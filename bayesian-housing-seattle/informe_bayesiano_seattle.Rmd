@@ -1,0 +1,1789 @@
+---
+title: "Una mirada bayesiana al mercado inmobiliario"
+author: "Jordi Lluch Ortiz & Laura Sacristán Herencia"
+date: "2025-05-06"
+output: 
+  pdf_document: 
+    fig_caption: yes
+    number_sections: true
+    fig_width: 6
+    fig_height: 4.5
+    toc_depth: 3
+    latex_engine: xelatex
+    keep_tex: true
+    pandoc_args:
+      - "--variable"
+      - "geometry:margin=2cm"
+      - "--variable"
+      - "fontsize=10pt"
+      - "--variable"
+      - "monofont=Courier New"
+  html_document:
+    code_folding: show
+    highlight: haddock
+    keep_md: yes
+    number_sections: yes
+    theme: readable
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+header-includes:
+- \pagenumbering{gobble}
+- \usepackage{subfig, float}
+- \usepackage[labelsep=period]{caption}
+- \usepackage[labelfont=bf]{caption}
+- \renewcommand{\and}{\\}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+<!-- Preferred output format: PDF -->
+
+\newpage
+
+\tableofcontents
+
+\pagebreak
+
+\pagenumbering{arabic}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,fig.width = 7, fig.height = 3.5)
+library(rstan)
+library(randomForest)
+library(patchwork)
+options(mc.cores = min(4, parallel::detectCores()))
+rstan_options(auto_write = TRUE)
+set.seed(2025)
+
+# --- Configuración del muestreo MCMC ---
+# QUICK <- TRUE reduce las iteraciones para comprobar rápido que todo compila.
+# Los resultados con QUICK = TRUE NO son válidos para el informe final.
+QUICK    <- FALSE
+N_ITER   <- if (QUICK) 400 else 2000
+N_WARMUP <- N_ITER / 2
+N_CHAINS <- 4
+
+# --- Funciones auxiliares ---
+mape_fun <- function(y, yhat) mean(abs((y - yhat) / y), na.rm = TRUE) * 100
+
+diagnosticos <- function(fit, pars) {
+  s <- rstan::summary(fit, pars = pars)$summary
+  list(rhat_max     = max(s[, "Rhat"], na.rm = TRUE),
+       neff_min     = min(s[, "n_eff"], na.rm = TRUE),
+       divergencias = rstan::get_num_divergent(fit))
+}
+
+veredicto <- function(d) {
+  if (d$rhat_max < 1.01 && d$neff_min > 400 && d$divergencias == 0)
+    "por lo que consideramos que las cadenas han convergido"
+  else
+    "por lo que la convergencia debe interpretarse con cautela"
+}
+
+res <- list()   # aquí se guardan los MAPE de todos los modelos
+library(tidyverse)
+library(kableExtra)
+library(corrplot)
+library(ggthemes)
+library(dplyr)
+library(tidyr)
+library(bayesplot)
+library(ggplot2)
+```
+
+# Capítulo 1: Introducción
+
+## Prefacio
+
+### Origen del proyecto
+
+Actualmente en España estamos sufriendo las consecuencias de una grave crisis inmobiliaria, donde comprar un piso o tener algo en propiedad se
+considera un lujo. En otras asignaturas de este mismo máster hemos
+estudiado el mercado inmobiliario en España, por lo que nos resultaba
+interesante trasladar este problema a esta misma situación en otra parte
+del mundo.
+
+### Descripción del problema
+
+En este trabajo se analiza el mercado inmobiliario de la ciudad de
+Seattle, Washington (EE.UU.), utilizando datos reales de propiedades
+vendidas entre agosto y diciembre de 2022. La idea principal es entender
+cómo distintas características de una casa pueden influir en su precio
+y, al mismo tiempo, construir modelos que nos permitan hacer
+predicciones lo más precisas posible.
+
+Para esto, se cuenta con un conjunto de datos sacados de la plataforma
+Kaggle que incluye información como el número de habitaciones y baños,
+el tamaño de la vivienda, el tamaño del terreno, el código postal, y el
+precio final de venta en dólares. Gracias a estos datos, se pueden
+analizar patrones y relaciones entre las variables para ver qué factores
+tienen más peso a la hora de fijar el precio de una casa.
+
+### Objetivos del proyecto
+
+Este trabajo tiene como objetivo principal predecir el precio de venta
+de una vivienda en función de sus características. Pero además, se
+busca:
+
+-   Evaluar el impacto que tienen ciertas variables estructurales (como
+    habitaciones, baños o metros cuadrados) en el precio.
+-   Aplicar distintos modelos bayesianos para comparar cuál funciona
+    mejor:
+    -   Pooled Model: un modelo simple que asume una única relación para
+        todos los datos.
+    -   Hierarchical Model: un modelo que toma en cuenta que cada zona
+        (por ejemplo, un código postal) puede tener un comportamiento
+        distinto.
+-   Por último, se va a comparar el rendimiento de estos modelos
+    bayesianos con métodos clásicos de regresión para ver cuál da
+    mejores resultados a la hora de predecir.
+
+Este análisis no solo permite predecir precios de forma más precisa,
+sino que también ayuda a entender mejor cómo se comporta el mercado
+inmobiliario en Seattle. Además, usar métodos bayesianos tiene la
+ventaja de que nos permite incorporar incertidumbre en las predicciones
+y construir modelos más flexibles.
+
+\newpage
+
+## Análisis Exploratorio del conjunto de datos
+
+### Variable respuesta y variables explicativas
+
+Antes de construir los modelos de predicción, es fundamental realizar un
+análisis exploratorio del conjunto de datos para entender mejor su
+estructura, limpiar posibles inconsistencias y transformar variables
+cuando sea necesario.
+
+En este caso, se trabaja con datos reales de viviendas vendidas en
+**Seattle, Washington** entre agosto y diciembre de 2022. Para el
+desarrollo del modelo se cuenta con dos conjuntos de datos previamente
+separados: un conjunto de entrenamiento (train) con 2.016 observaciones,
+y un conjunto de prueba (test) con 505 observaciones.
+
+Sin embargo, para el análisis descriptivo y exploratorio inicial, se han
+combinado ambos conjuntos con el fin de tener una visión más completa y
+representativa de los datos. Esta unión permite visualizar mejor las
+distribuciones, detectar valores atípicos y entender el comportamiento
+general de las variables antes de proceder con la construcción y
+evaluación de los modelos predictivos.
+
++----------------+------------------------------------------------+
+| Variable       | Descripción                                    |
++================+================================================+
+| `id`           | Identificador único de cada vivienda           |
++----------------+------------------------------------------------+
+| `beds`         | Número de habitaciones                         |
++----------------+------------------------------------------------+
+| `baths`        | Número de baños. El valor 0.5 indica un        |
+|                | “half-bath” (medio baño: tiene retrete o       |
+|                | ducha)                                         |
++----------------+------------------------------------------------+
+| `size`         | Superficie construida total de la vivienda     |
++----------------+------------------------------------------------+
+| `size_units`   | Unidad de medida del tamaño (`sqft` = pies     |
+|                | cuadrados)                                     |
++----------------+------------------------------------------------+
+| `lot_size`     | Tamaño del terreno extra donde se ubica la     |
+|                | vivienda (sin contar el inmueble)              |
++----------------+------------------------------------------------+
+| `l             | Unidad de medida del terreno (`sqft` o `acre`) |
+| ot_size_units` |                                                |
++----------------+------------------------------------------------+
+| `zip_code`     | Código postal donde se encuentra la propiedad  |
++----------------+------------------------------------------------+
+| `l             | Agrupación de zonas geográficas para uso       |
+| ocation_group` | posterior en modelos jerárquicos               |
++----------------+------------------------------------------------+
+| `price`        | Precio de venta de la vivienda en dólares      |
++----------------+------------------------------------------------+
+
+```{r}
+df_train <- read.csv("data/train.csv")
+df_train$id <- 1:nrow(df_train)
+df_train <- df_train[, c("id", setdiff(names(df_train), "id"))]
+
+df_test <- read.csv("data/test.csv")
+df_test$id <- 2016 + 1:nrow(df_test)
+df_test <- df_test[, c("id", setdiff(names(df_test), "id"))]
+```
+
+```{r}
+df_train$location_group <- with(df_train, ifelse(zip_code %in% c(98101, 98104, 98121, 98164, 98109), "Urban",
+                              ifelse(zip_code %in% c(98102, 98103, 98105, 98107, 98112, 98115, 98119), "Popular",
+                              ifelse(zip_code %in% c(98117, 98116, 98122, 98125, 98133, 98126), "Residential",
+                              ifelse(zip_code %in% c(98106, 98108, 98118, 98136, 98144, 98146, 98188), "Peripheral",
+                              ifelse(zip_code %in% c(98168, 98177, 98178, 98199), "Suburban", "Unknown"))))))
+
+df_train$location_group <- factor(df_train$location_group, levels = c("Urban", "Popular", 
+                                                           "Residential", "Peripheral", 
+                                                           "Suburban"))
+
+df_test$location_group <- with(df_test, ifelse(zip_code %in% c(98101, 98104, 98121, 98164, 98109), "Urban",
+                              ifelse(zip_code %in% c(98102, 98103, 98105, 98107, 98112, 98115, 98119), "Popular",
+                              ifelse(zip_code %in% c(98117, 98116, 98122, 98125, 98133, 98126), "Residential",
+                              ifelse(zip_code %in% c(98106, 98108, 98118, 98136, 98144, 98146, 98188), "Peripheral",
+                              ifelse(zip_code %in% c(98168, 98177, 98178, 98199), "Suburban", "Unknown"))))))
+
+df_test$location_group <- factor(df_test$location_group, levels = c("Urban", "Popular", 
+                                                           "Residential", "Peripheral", 
+                                                           "Suburban"))
+```
+
+Veamos las primeras observaciones de nuestro dataset:
+
+```{r}
+head(df_train)
+```
+
+Dado que algunas variables de tamaño están en diferentes unidades
+(square foot y acres), es necesario convertir estos valores a metros
+cuadrados para facilitar la interpretación y el análisis. Eliminamos por
+lo tanto las variables que representan las unidades. Observamos también
+como parece haber algun valor missing, por lo que vamos a analizar
+cuantos tenemos en total:
+
+```{r}
+df <- rbind(df_train,df_test)
+
+na_por_variable <- sapply(df, function(x) sum(is.na(x)))
+porcentaje_na <- round(100 * na_por_variable / nrow(df), 2)
+
+tabla_na <- data.frame(
+  Variable = names(na_por_variable),
+  NAs = na_por_variable,
+  Porcentaje = porcentaje_na
+)
+
+tabla_na <- tabla_na[order(-tabla_na$Porcentaje), ]
+
+print(tabla_na)
+```
+
+En el análisis de valores missings, observamos que solo la variable
+lot_size presenta NAs. Esta variable representa el tamaño del terreno
+adicional (sin incluir la superficie construida de la vivienda). Dado
+que no hemos detectado valores NA en otras variables, y considerando el
+significado de lot_size, hemos decidido imputar los valores faltantes
+como 0. Esto se basa en el hecho de que tiene sentido que algunas
+viviendas no dispongan de terreno adicional y, de hecho, en nuestro
+conjunto de datos no teníamos ninguna vivienda con lot_size = 0
+explícitamente registrada, por lo que esta imputación cubre ese caso de
+forma coherente.
+
+```{r}
+library(dplyr)
+
+df_train_clean <- df_train %>%
+  mutate(
+    size_m2 = case_when(
+      size_units == "sqft" ~ size * 0.092903,
+      TRUE ~ NA_real_
+    ),
+    lot_size_m2 = case_when(
+      lot_size_units == "sqft" ~ lot_size * 0.092903,
+      lot_size_units == "acre" ~ lot_size * 4046.86,
+      TRUE ~ NA_real_
+    ),
+    lot_size_m2 = ifelse(is.na(lot_size_m2), 0, lot_size_m2)
+  ) %>%
+  select(-size_units, -lot_size_units) %>% 
+  select(id, beds, baths, size_m2, lot_size_m2, zip_code, location_group, price)  
+
+
+df_test_clean <- df_test %>%
+  mutate(
+    size_m2 = case_when(
+      size_units == "sqft" ~ size * 0.092903,
+      TRUE ~ NA_real_
+    ),
+    lot_size_m2 = case_when(
+      lot_size_units == "sqft" ~ lot_size * 0.092903,
+      lot_size_units == "acre" ~ lot_size * 4046.86,
+      TRUE ~ NA_real_
+    ),
+    lot_size_m2 = ifelse(is.na(lot_size_m2), 0, lot_size_m2)
+  ) %>%
+  select(-size_units, -lot_size_units) %>%
+  select(id, beds, baths, size_m2, lot_size_m2, zip_code, location_group, price)  
+
+df_clean <- rbind(df_train_clean,df_test_clean)
+```
+
+### Estadísticas descriptivas
+
+A continuación, se presenta una tabla con estadísticas descriptivas de
+las variables numéricas de nuestra base de datos. Esta tabla incluye
+medidas como la media, mediana, desviación estándar, mínimo y máximo:
+
+```{r, warning=FALSE}
+df_clean %>%
+  select(beds, baths, size_m2, lot_size_m2, price) %>%
+  summarise(across(
+    everything(),
+    list(media = mean, mediana = median, sd = sd, min = min, max = max),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", "medida"),
+    names_pattern = "^(.*)_(.*)$"
+  ) %>%
+  tidyr::pivot_wider(names_from = medida, values_from = value)
+```
+
+A continuación se presentan dos gráficos de barras que muestran la
+frecuencia de cada categoría de las variables numéricas discretas: el
+número de dormitorios (beds) y el número de baños (baths):
+
+```{r, fig.align='center', fig.pos='H', Warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+par=
+
+bed_counts <- df_clean %>%
+  count(beds) 
+
+# Plot histogram with count labels
+g1<- ggplot(bed_counts, aes(x = beds, y = n)) +
+  geom_col(fill = "skyblue", color = "black") + 
+  geom_text(aes(label = n), vjust = -0.2, size=3) +       
+  scale_x_continuous(breaks = 0:15) + 
+  labs(title = "Distribución de dormitorios", x = "Número de dormitorios", y = "Frecuencia") +
+  theme_minimal()
+
+
+baths_counts <- df_clean %>%
+  count(baths)  
+
+g2 <- ggplot(baths_counts, aes(x = baths, y = n)) +
+  geom_col(fill = "skyblue", color = "black") + 
+  geom_text(aes(label = n), vjust = -0.2, size=3) +     
+  scale_x_continuous(breaks = 0:15) + 
+  labs(title = "Distribución de baños", x = "Número de baños", y = "Frecuencia") +
+  theme_minimal()
+
+g1 + g2
+```
+
+En el gráfico de la izquierda, que representa la distribución del número
+de dormitorios, se observa que el valor más común es 3 dormitorios, con
+818 casos registrados. También hay una cantidad considerable de
+propiedades con 2 (686) y 4 (506) dormitorios. A medida que aumenta el
+número de dormitorios, la frecuencia cae de forma notable, lo que
+sugiere que las viviendas con más de 6 habitaciones son muy poco comunes
+en nuestra base de datos. Incluso aparecen algunos casos extremos con
+hasta 15 dormitorios, aunque estos claramente representan outliers.
+
+En el gráfico de la derecha, que muestra la distribución del número de
+baños, el patrón es similar. La mayoría de las propiedades tienen entre
+1 y 3 baños, siendo el valor más frecuente 2 baños, con 767
+observaciones. También se observa una caída gradual en la frecuencia
+para valores mayores a 3 baños, y algunos casos aislados con más de 6.
+Es interesante notar la presencia de viviendas con 0.5 , 1.5 , 2.5 e
+incluso 3.5 baños. Esto se debe a que nuestro dataset cuenta como baño
+entero aquel que contiene retrete y ducha, por lo que si hay un baño que
+solo contiene una de las dos, se contabiliza como medio.
+
+A continuación realizamos dos boxplots para visualizar la distribución
+de las dos variables predictoras continuas, que son el área de la
+vivienda y el área extra del terreno:
+
+```{r, fig.align='center', fig.pos='H', warning=FALSE}
+library(ggplot2)
+
+g1 <- ggplot(df_clean, aes(y = size_m2)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Area de la vivienda",
+       y = "Area Vivienda") +
+  theme_minimal()
+
+g2 <- ggplot(df_clean, aes(y = lot_size_m2)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Area extra del terreno",
+       y = "Area Extra") +
+  theme_minimal()
+
+g1 + g2
+```
+
+En el gráfico de la izquierda, que representa el área de la vivienda, se
+puede observar que la mayoría de los valores se concentran entre
+aproximadamente 100 y 250 metros cuadrados, aunque hay varios outliers
+que superan los 500 e incluso los 1000 metros. Esto indica que existen
+algunas viviendas mucho más grandes que el promedio. Por otro lado, en
+el gráfico de la derecha, correspondiente al área extra del terreno,
+también se ven bastantes valores extremos, con algunos puntos muy
+alejados del resto, superando los 500 mil e incluso el millón de metros
+cuadrados. Esto sugiere que hay terrenos con superficies
+extraordinariamente grandes que podrían influir mucho en el análisis si
+no se tratan adecuadamente.
+
+Para acabar con las variables numéricas, visualizamos la variable a
+predecir, el precio:
+
+```{r, fig.align='center', fig.pos='H', warning=FALSE}
+ggplot(df_clean, aes(y = price)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Precio de la vivienda",
+       y = "Precio") +
+  theme_minimal()
+```
+
+De la misma forma que en el anterior boxplot (el del area del terreno
+extra), observamos la presencia de outliers, pudiendo afectar a nuestros
+resultados estadísticos si no los tenemos en cuenta.
+
+Por último, analicemos las variables categóricas (los códigos postales y
+los tipos de ubicación de las propiedades):
+
+```{r, fig.align='center', fig.pos='H', warning=FALSE}
+library(ggplot2)
+
+df_clean$zip_code <- factor(df_clean$zip_code)
+
+g1 <- ggplot(df_clean, aes(x = zip_code)) +
+  geom_bar(fill = "#69b3a2", color = "black") +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.2, size=3) +  
+  labs(title = "Distribución de Códigos Postal",
+       x = "Código Postal",
+       y = "Frecuencia") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6))
+
+
+g2 <- ggplot(df_clean, aes(x = location_group)) +
+  geom_bar(fill = "#69b3a2", color = "black") +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.2, size=3) + 
+  labs(title = "Distribución de Tipos de Ubicación",
+       x = "Tipo de Ubicación",
+       y = "Frecuencia") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size=7))
+
+g1 + g2
+```
+
+En el gráfico de la izquierda, que muestra la distribución de códigos
+postales, se observa una gran variabilidad en la frecuencia de registros
+por zona. Algunos códigos postales, como el 98104, 98164 y 98199, tienen
+una frecuencia muy baja (menos de 20 registros), mientras que otros como
+el 98101, 98115 y 98117 tienen alrededor de 200 cada uno. Esto indica
+que los datos están desbalanceados geográficamente, con ciertas zonas
+mucho más representadas que otras, lo cual podría influir en los
+modelos.
+
+En el gráfico de la derecha se muestra la distribución de los tipos de
+ubicación. Aquí se nota que la mayoría de las propiedades están en zonas
+“Popular” (848 registros), seguidas por “Residential” (709) y
+“Peripheral” (527). En cambio, hay menos en zonas “Urban” (194) y
+“Suburban” (243). Esta concentración también nos dice que los análisis
+podrían estar más influenciados por las características de las zonas
+populares o residenciales, y convendría tenerlo en cuenta si queremos
+hacer generalizaciones sobre todas las ubicaciones.
+
+### Tratamiento de Outliers
+
+Tras observar las distribuciones de nuestras variables, especialmente en
+las variables numéricas continuas, se han identificado algunas
+observaciones que se alejan considerablemente del comportamiento general
+del resto de los datos. Por ejemplo, viviendas con más de 10 dormitorios
+o más de 6 baños, o viviendas con un área superior a 1000 y precios
+desorbitados probablemente representan propiedades atípicas o errores de
+registro.
+
+Estos valores extremos pueden tener un impacto negativo en el análisis y
+en la construcción de modelos predictivos, pudiendo aumentar el error de
+nuestros modelos y generar predicciones poco representativas. Es por esto que hemos decidido aplicar el método del rango intercuartílico
+(IQR), una técnica robusta y común para detectar y eliminar outliers en
+variables numéricas: se descartan las filas con valores por encima de
+$Q_3 + 1.5\,\mathrm{IQR}$ o por debajo de $Q_1 - 1.5\,\mathrm{IQR}$.
+
+Para evitar que la evaluación sea optimista, **los límites se calculan
+únicamente con el conjunto de entrenamiento**. En train se filtran las
+variables predictoras (`beds`, `baths`, `size_m2`, `lot_size_m2`) y
+también el precio; en test se filtran **solo los predictores**, de modo
+que ninguna observación de test se descarta por el valor de la variable
+que queremos predecir.
+
+```{r}
+vars_iqr <- c("beds", "baths", "size_m2", "lot_size_m2")
+
+df_train_c <- df_clean %>% filter(id <= 2016)
+df_test_c  <- df_clean %>% filter(id >  2016)
+
+# Límites del IQR calculados solo con el conjunto de entrenamiento
+limites_iqr <- function(x) {
+  q <- quantile(x, c(0.25, 0.75), na.rm = TRUE)
+  i <- q[2] - q[1]
+  c(inf = unname(q[1] - 1.5 * i), sup = unname(q[2] + 1.5 * i))
+}
+lim <- lapply(df_train_c[, c(vars_iqr, "price")], limites_iqr)
+
+filtrar_iqr <- function(d, vars) {
+  keep <- rep(TRUE, nrow(d))
+  for (v in vars) keep <- keep & d[[v]] >= lim[[v]]["inf"] & d[[v]] <= lim[[v]]["sup"]
+  d[keep, ]
+}
+
+df_sin_outliers <- bind_rows(
+  filtrar_iqr(df_train_c, c(vars_iqr, "price")),  # train: predictores y precio
+  filtrar_iqr(df_test_c,  vars_iqr)               # test: solo predictores
+)
+
+# Mantenemos todos los niveles de zip_code (también los que no aparecen en train)
+df_sin_outliers$zip_code <- factor(df_sin_outliers$zip_code,
+                                   levels = levels(factor(df_clean$zip_code)))
+
+n_elim_train <- nrow(df_train_c) - sum(df_sin_outliers$id <= 2016)
+n_elim_test  <- nrow(df_test_c)  - sum(df_sin_outliers$id >  2016)
+
+```
+
+```{r}
+df_sin_outliers %>%
+  select(beds, baths, size_m2, lot_size_m2, price) %>%
+  summarise(across(
+    everything(),
+    list(media = mean, mediana = median, sd = sd, min = min, max = max),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", "medida"),
+    names_pattern = "^(.*)_(.*)$"
+  ) %>%
+  tidyr::pivot_wider(names_from = medida, values_from = value)
+```
+
+Se han eliminado `r n_elim_train` observaciones del conjunto de
+entrenamiento y `r n_elim_test` del de test. Las estadísticas descriptivas
+muestran que se han eliminado los valores extremos de los predictores (y
+del precio en train). Veamos como quedan ahora los
+gráficos de las variables numéricas de nuestro dataset:
+
+```{r, fig.align='center', fig.pos='H'}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+par=
+
+bed_counts <- df_sin_outliers %>%
+  count(beds)  
+
+# Plot histogram with count labels
+g1<- ggplot(bed_counts, aes(x = beds, y = n)) +
+  geom_col(fill = "skyblue", color = "black") + 
+  geom_text(aes(label = n), vjust = -0.2, size=3) +      
+  scale_x_continuous(breaks = 0:15) + 
+  labs(title = "Distribución del número de dormitorios", x = "Número de dormitorios", y = "Frecuencia") +
+  theme_minimal()
+
+
+baths_counts <- df_sin_outliers %>%
+  count(baths) 
+
+g2 <- ggplot(baths_counts, aes(x = baths, y = n)) +
+  geom_col(fill = "skyblue", color = "black") + 
+  geom_text(aes(label = n), vjust = -0.2, size=3) +     
+  scale_x_continuous(breaks = 0:15) + 
+  labs(title = "Distribución del número de baños", x = "Número de baños", y = "Frecuencia") +
+  theme_minimal()
+
+g1 + g2
+```
+
+```{r, fig.align='center', fig.pos='H'}
+library(ggplot2)
+
+g1 <- ggplot(df_sin_outliers, aes(y = size_m2)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Area de la vivienda",
+       y = "Area Vivienda") +
+  theme_minimal()
+
+g2 <- ggplot(df_sin_outliers, aes(y = lot_size_m2)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Area extra del terreno",
+       y = "Area Extra") +
+  theme_minimal()
+
+g1 + g2
+```
+
+```{r, fig.align='center', fig.pos='H'}
+ggplot(df_sin_outliers, aes(y = price)) +
+  geom_boxplot(fill = "#FF9999", color = "black") +
+  labs(title = "Boxplot del Precio de la vivienda",
+       y = "Precio") +
+  theme_minimal()
+```
+
+Una vez limpiado el conjunto de datos, es útil analizar cómo varía el
+precio de las viviendas en función del area y del tipo de ubicación:
+
+```{r, fig.align='center', fig.pos='H',warning=FALSE, message=FALSE}
+g1<-ggplot(df_sin_outliers, aes(x = size_m2, y = price)) +
+  geom_point(alpha = 0.6, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "red") +
+  theme_minimal() +
+  labs(title = "Área vs Precio", x = "Área", y = "Precio")
+
+g2<-ggplot(df_sin_outliers, aes(x = location_group, y = price, fill = location_group)) +
+  geom_boxplot(show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Precio vs Ubicación", x = "Ubicación", y = "Precio") +
+  coord_flip()
+
+g1+g2
+```
+
+# Capítulo 2: Análisis
+
+Una vez realizado el análisis exploratorio y limpiado el conjunto de
+datos, se da comienzo a la construcción de los primeros modelos
+estadísticos con el objetivo de predecir el precio de las viviendas en
+función de sus características estructurales.
+
+## Modelo Pooled
+
+En esta sección se presentan diferentes enfoques de modelado, comenzando
+por el más básico: el Pooled Model, que asume que todas las
+observaciones comparten la misma relación lineal entre las variables
+predictoras y el precio, sin tener en cuenta posibles diferencias entre
+zonas o subgrupos (como los códigos postales). El objetivo de comenzar
+con este modelo simple es establecer una línea base de rendimiento, que
+servirá para comparar con modelos más complejos en las siguientes
+etapas.
+
+$$
+\begin{aligned}
+y_i &\sim \mathcal{N}(\alpha + \mathbf{x}_i^\top \boldsymbol{\beta}, \sigma^2) \quad \text{para } i = 1, 2, \dots, N \\
+\\
+\alpha &\sim \text{Flat prior} \\
+\boldsymbol{\beta} &\sim \text{Flat prior} \\
+\sigma &\sim \text{Flat prior (} \sigma > 0 \text{)}
+\end{aligned}
+$$
+
+Donde:
+
+-   $y_i$ es el precio de la vivienda $i$
+-   $\mathbf{x}_i$ es el vector de predictores (número de habitaciones,
+    baños, superficie y terreno)
+-   $\boldsymbol{\beta}$ es el vector de coeficientes asociados a las
+    variables explicativas
+-   $\alpha$ es el intercepto o término independiente
+-   $\sigma^2$ es la varianza de los errores (desviación estándar al
+    cuadrado)
+
+En este primer modelo asumimos que el precio sigue una distribución
+normal, donde no se introducen distribuciones a priori como tal, si no
+que asumimos unas distribuciones "flat". Las variables predictoras son
+las numéricas: el número de habitaciones, el número de baños, el área de
+la vivienda y el terreno exterior. Vamos a entrenar el modelo con la
+muestra de train y vemos si converge:
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+vars <- c("beds","baths","size_m2","lot_size_m2")
+
+df_train_cv <- df_sin_outliers %>%
+  filter(id <= 2016)
+
+df_validation_cv  <- df_sin_outliers %>%
+  filter(id > 2016)
+
+data_list <- list(
+  N = nrow(df_train_cv),
+  K = length(vars),
+  X = as.matrix(df_train_cv[, vars]),
+  y = df_train_cv$price
+)
+
+library(rstan)
+
+modelo_stan <- stan("stan_models/modelo_regresion.stan",
+                    iter = N_ITER, warmup = N_WARMUP, chains = N_CHAINS,
+                    data = data_list, seed = 1, refresh = 0)
+d_pool <- diagnosticos(modelo_stan, c("alpha", "beta", "sigma"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+print(modelo_stan)
+```
+
+Para comprobar la convergencia revisamos el diagnóstico $\widehat{R}$ y el
+tamaño efectivo de muestra $n_{eff}$ (como regla práctica,
+$\widehat{R} < 1.01$ y $n_{eff} > 400$): el $\widehat{R}$ máximo es
+`r round(d_pool$rhat_max, 3)`, el $n_{eff}$ mínimo es
+`r round(d_pool$neff_min)` y hay `r d_pool$divergencias` transiciones
+divergentes, `r veredicto(d_pool)`. Una vez entrenado, se utiliza la
+muestra de test para predecir los precios de las viviendas y calculamos
+el Mean Absolute Percentage Error) una métrica que indica el error
+promedio porcentual entre los valores reales y los predichos:
+
+```{r,warning=FALSE}
+posterior <- as.matrix(modelo_stan)
+
+beta_hat <- colMeans(posterior[, grep("^beta\\[", colnames(posterior), value = TRUE)])
+alpha_hat <- mean(posterior[, "alpha"])
+
+X_test <- as.matrix(df_validation_cv[, vars])
+y_pred_test <- as.vector(alpha_hat + X_test %*% beta_hat)
+
+y_real <- df_validation_cv$price
+
+mape <- mean(abs((y_real - y_pred_test) / y_real)) * 100
+
+res$pooled <- mape
+print(paste("MAPE:", round(mape, 2), "%"))
+```
+
+Hemos obtenido un MAPE del `r round(res$pooled, 2)`%, lo que indica que,
+en promedio, las predicciones del modelo difieren un
+`r round(res$pooled)`% respecto a los valores reales del precio de las
+viviendas. Este valor de MAPE sugiere que el
+modelo logra captar parte importante de la estructura de los datos,
+aunque todavía hay margen de mejora. En los próximos modelos, se buscará
+reducir este error incorporando modelos más complejos, como el modelo jerárquico, que permiten tener en cuenta diferencias
+estructurales entre zonas o incluir más información contextual.
+
+## Modelo Regresión Gamma Simple
+
+Para modelar el precio de las viviendas se selecciona una regresión
+Gamma simple, ya que el precio es una variable continua, estrictamente
+positiva y potencialmente asimétrica. De nuevo, se usa un enfoque
+bayesiano para incorporar conocimiento previo y manejar de manera
+coherente la incertidumbre de los parámetros. En este caso usaremos solo
+la variable predictora (size $m^2$), puesto que tiene una relación
+intuitiva y fuerte con el precio (más metros cuadrados, mayor valor
+esperado) y además permite explicar y visualizar el modelo más
+fácilmente antes de expandirlo a más variables predictoras. En este
+modelo, modelamos la relación entre la media del precio y el predictor
+(tamaño en m²) usando un modelo log-lineal, asegurando valores positivos
+de la media.
+
+La distribución Gamma es una elección adecuada para modelar variables
+continuas y estrictamente positivas, como es el caso del precio de las
+viviendas. Esta elección se fundamenta en varias propiedades
+estadísticas que se ajustan a la naturaleza de la variable dependiente:
+
+-   El precio de una vivienda no puede ser negativo, es decir, $y > 0$.
+
+-   La distribución de precios suele ser asimétrica, con una cola hacia
+    la derecha (sesgo positivo), característica que captura bien la
+    distribución Gamma.
+
+-   La varianza tiende a aumentar con la media, lo cual también es una
+    propiedad de la distribución Gamma.
+
+Sea $y$ una variable aleatoria que representa el precio de una vivienda.
+Decimos que $y$ sigue una distribución Gamma si:
+
+$$
+y \sim \text{Gamma}(\alpha, \beta)
+$$
+
+donde:
+
+-   $\alpha > 0$ es el parámetro de forma,
+
+-   $\beta > 0$ es el parámetro de tasa.
+
+La función de densidad de probabilidad de la distribución Gamma está
+dada por:
+
+$$
+f(y \mid \alpha, \beta) = \frac{\beta^{\alpha}}{\Gamma(\alpha)} y^{\alpha - 1} e^{-\beta y}, \quad \text{para } y > 0
+$$
+
+donde $\Gamma(\alpha)$ es la función Gamma evaluada en $\alpha$.
+
+Las principales características de esta distribución son:
+
+$$
+\mathbb{E}[y] = \frac{\alpha}{\beta}, \qquad \text{Var}(y) = \frac{\alpha}{\beta^2}
+$$
+
+Estas propiedades implican que la varianza es proporcional al cuadrado
+de la media:
+
+$$
+\text{Var}(y) \propto \mathbb{E}[y]^2
+$$
+
+Este comportamiento es coherente con los datos de precios inmobiliarios,
+donde propiedades más caras tienden a tener mayor dispersión de precios.
+Por tanto, la distribución Gamma resulta adecuada para modelar este tipo
+de variable bajo un enfoque de regresión.
+
+Sea $y_i$ el precio de la vivienda $i$-ésima, y $x_i$ la superficie de
+dicha vivienda en metros cuadrados. Se plantea un modelo de regresión en
+el que se asume que la variable dependiente $y_i$ sigue una distribución
+Gamma con parámetros $\alpha$ (forma) y $\beta_i$ (tasa), cuya media
+está determinada por una relación exponencial con la covariable $x_i$:
+
+$$
+y_i \sim \text{Gamma}(\alpha, \beta_i)
+$$
+
+$$
+\mu_i = \mathbb{E}[y_i] = \frac{\alpha}{\beta_i}
+$$
+
+$$
+\log(\mu_i) = \beta_0 + \beta_1 x_i
+$$
+
+En este contexto, $\mu_i$ representa el valor esperado del precio de la
+vivienda $i$, y se modela mediante una función de enlace logarítmica
+para garantizar su positividad. Sustituyendo la expresión de $\mu_i$ en
+la definición del parámetro de tasa, se obtiene:
+
+$$
+\beta_i = \frac{\alpha}{\mu_i} = \frac{\alpha}{\exp(\beta_0 + \beta_1 x_i)}
+$$
+
+Por tanto, la expresión final del modelo en su forma condicional queda:
+
+$$
+y_i \sim \text{Gamma}\left(\alpha, \frac{\alpha}{\exp(\beta_0 + \beta_1 x_i)}\right)
+$$
+
+Esta parametrización garantiza que la media de la distribución está
+determinada por una función exponencial de la covariable, manteniendo la
+consistencia con el rango positivo de la variable respuesta.
+
+Bajo un enfoque bayesiano, es necesario especificar distribuciones a
+priori para los parámetros del modelo. En este caso, se consideran las
+siguientes distribuciones poco informativas para los coeficientes de
+regresión y el parámetro de forma $\alpha$:
+
+$$
+\beta_0 \sim \mathcal{N}(0, 10^2)
+$$
+
+$$
+\beta_1 \sim \mathcal{N}(0, 10^2)
+$$
+
+$$
+\alpha \sim \text{Gamma}(2, 0.1)
+$$
+
+Estas distribuciones reflejan una creencia inicial amplia sobre los
+posibles valores de los parámetros, permitiendo que los datos informen
+sustancialmente la posterior.
+
+El modelo completo queda entonces especificado como:
+
+$$
+y_i \sim \text{Gamma}\left(\alpha, \frac{\alpha}{\mu_i}\right)
+$$
+
+$$
+\mu_i = \exp(\beta_0 + \beta_1 x_i)
+$$
+
+$$
+\beta_0 \sim \mathcal{N}(0, 10^2)
+$$
+
+$$
+\beta_1 \sim \mathcal{N}(0, 10^2)
+$$
+
+$$
+\alpha \sim \text{Gamma}(2, 0.1)
+$$
+
+Esta estructura permite la aplicación de técnicas de inferencia
+bayesiana para estimar los parámetros del modelo, obteniendo no solo
+estimaciones puntuales sino distribuciones posteriores completas que
+reflejan la incertidumbre asociada.
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+df_train_cv <- df_sin_outliers %>%
+  filter(id <= 2016)
+
+df_validation_cv  <- df_sin_outliers %>%
+  filter(id > 2016)
+
+data_list <- list(
+  N = nrow(df_train_cv),
+  x = df_train_cv$size_m2,
+  y = df_train_cv$price
+)
+
+library(rstan)
+
+init_gamma <- function() list(beta_0 = 13, beta_1 = 0.004, alpha = 5)
+
+modelo_stan3 <- stan("stan_models/gamma_regresion.stan",
+                     iter = N_ITER, warmup = N_WARMUP, chains = N_CHAINS,
+                     data = data_list, seed = 1, init = init_gamma, refresh = 0)
+d_gamma <- diagnosticos(modelo_stan3, c("beta_0", "beta_1", "alpha"))
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+print(modelo_stan3)
+```
+
+### Convergencia de las trazas de las cadenas de Markov
+
+Existen diversos métodos para verificar que las cadenas de Markov
+generadas por el algoritmo MCMC han alcanzado su distribución
+estacionaria. En este análisis, se han realizado un total de `r N_ITER` iteraciones por cadena, de las cuales las primeras `r N_WARMUP` son descartadas como fase de calentamiento, con el objetivo de eliminar la influencia de
+las condiciones iniciales. Se han empleado cuatro cadenas
+independientes, lo que permite evaluar la estabilidad y reproducibilidad
+de los resultados obtenidos.
+
+Para los parámetros $\beta_0$, $\beta_1$ y $\alpha$, el tamaño efectivo
+mínimo de muestra es `r round(d_gamma$neff_min)` y el diagnóstico
+$\widehat{R}$ (Gelman y Rubin) máximo es `r round(d_gamma$rhat_max, 3)`,
+con `r d_gamma$divergencias` transiciones divergentes,
+`r veredicto(d_gamma)` (regla práctica: $\widehat{R} < 1.01$ y
+$n_{eff} > 400$).
+
+En la figura siguiente se representan las trazas de las cuatro cadenas
+correspondientes a cada parámetro. Una buena mezcla se reconoce porque las
+cadenas se superponen y oscilan alrededor de un valor estable, sin
+tendencias.
+
+```{r, warning=FALSE}
+posterior_samples <- as.data.frame(rstan::extract(modelo_stan3))
+
+mcmc_trace(modelo_stan3, pars = c("beta_0", "beta_1", "alpha"))
+```
+
+Finalmente, se muestra la autocorrelación (ACF) de las muestras
+generadas: una caída rápida indica que las iteraciones consecutivas
+aportan información casi independiente.
+
+```{r, warning=FALSE, message=FALSE}
+mcmc_acf_bar(as.array(modelo_stan3), pars = c("beta_0", "beta_1", "alpha"))
+```
+
+### Verosimilitud y distribución a posterior
+
+La verosimilitud del modelo describe la probabilidad de observar los
+datos dados unos parámetros específicos. En el caso del modelo Gamma
+propuesto, la verosimilitud para una única observación es:
+
+$$
+p(y_i \mid \alpha, \beta_0, \beta_1) = \frac{\left( \frac{\alpha}{\mu_i} \right)^\alpha}{\Gamma(\alpha)} y_i^{\alpha - 1} \exp\left( -\frac{\alpha y_i}{\mu_i} \right), \quad \text{con } \mu_i = \exp(\beta_0 + \beta_1 x_i)
+$$
+
+La verosimilitud conjunta para todas las observaciones
+$y_1, \dots, y_n$, asumiendo independencia condicional entre ellas, es:
+
+$$
+\mathcal{L}(\alpha, \beta_0, \beta_1 \mid \mathbf{y}, \mathbf{x}) = \prod_{i=1}^n \frac{\left( \frac{\alpha}{\mu_i} \right)^\alpha}{\Gamma(\alpha)} y_i^{\alpha - 1} \exp\left( -\frac{\alpha y_i}{\mu_i} \right)
+$$
+
+Desde un punto de vista bayesiano, queremos conocer la distribución de
+los parámetros del modelo dados los datos. Esto se obtiene a través del
+teorema de Bayes:
+
+$$
+p(\alpha, \beta_0, \beta_1 \mid \mathbf{y}, \mathbf{x}) \propto \mathcal{L}(\alpha, \beta_0, \beta_1 \mid \mathbf{y}, \mathbf{x}) \cdot p(\alpha) \cdot p(\beta_0) \cdot p(\beta_1)
+$$
+
+Dado que esta distribución posterior no se puede obtener de forma
+analítica, recurrimos a técnicas de simulación, como muestreo MCMC
+(Markov Chain Monte Carlo). En el apartado anterior se ha verificado la
+convergencia de las cadenas usando este  método, por lo que se procede al
+análisis de las distribuciones a posteriori de los parámetros del
+modelo. Estas distribuciones resumen todo el conocimiento disponible
+sobre los parámetros después de observar los datos, incorporando tanto
+la información previa como la evidencia empírica.
+
+Para interpretar adecuadamente la posterior, se utilizan gráficos que
+muestran la distribución de las muestras posteriores de cada parámetro.
+
+```{r, warning = FALSE}
+plot_posterior <- function(samples, param_name, label) {
+  dens <- density(samples)
+  df <- data.frame(x = dens$x, y = dens$y)
+
+  ci <- quantile(samples, probs = c(0.10, 0.90))
+  media <- mean(samples)
+
+  ggplot(df, aes(x, y)) +
+    geom_line(color = "steelblue", size = 1) +
+    geom_area(data = subset(df, x > ci[1] & x < ci[2]),
+              aes(x, y), fill = "lightblue", alpha = 0.5) +
+    geom_vline(xintercept = media, linetype = "dashed", color = "darkred", linewidth = 1) +
+    labs(title = paste("Distribución posterior de", label),
+         x = label,
+         y = "Densidad") +
+    theme_minimal()
+}
+```
+
+```{r, include=FALSE}
+resumen <- function(x) list(m = mean(x), lo = unname(quantile(x, 0.10)), hi = unname(quantile(x, 0.90)))
+r_b0 <- resumen(posterior_samples$beta_0)
+r_b1 <- resumen(posterior_samples$beta_1)
+r_al <- resumen(posterior_samples$alpha)
+```
+
+La siguiente figura muestra la distribución posterior del intercepto
+$\beta_0$, que representa el valor esperado del logaritmo del precio
+cuando el área de la vivienda es cero (lo cual no tiene una
+interpretación directa en el contexto físico, pero es útil
+estadísticamente como punto de referencia). La forma de la distribución
+es aproximadamente normal, centrada en torno al valor medio
+$\mu_{\beta_0} \approx$ `r round(r_b0$m, 2)`.
+
+El intervalo creíble del 80% se calcula como:
+
+$$
+\text{IC}_{80\%}(\beta_0) = \left[ \text{cuantil}_{0.10}(\beta_0), \ \text{cuantil}_{0.90}(\beta_0) \right] \approx [`r round(r_b0$lo, 2)`, `r round(r_b0$hi, 2)`]
+$$
+
+Este intervalo indica que, dado el modelo y los datos observados, hay
+una probabilidad del 80% de que el verdadero valor del parámetro
+$\beta_0$ se encuentre en ese rango.
+
+```{r, warning=FALSE}
+plot_posterior(posterior_samples$`beta_0`, "beta_0", expression(beta[0]))
+```
+
+El coeficiente $\beta_1$ mide el efecto del tamaño de la vivienda (en
+$m^2$) sobre el logaritmo del precio. La distribución posterior de este
+parámetro es también aproximadamente normal y está centrada alrededor de
+$\mu_{\beta_1} \approx$ `r round(r_b1$m, 4)`. Esto implica que por cada metro
+cuadrado adicional, el precio esperado de la vivienda se multiplica por
+$\exp(\beta_1)$, es decir, aumenta aproximadamente un
+`r round(100 * (exp(r_b1$m) - 1), 2)`%.
+
+El intervalo creíble del 80% para este parámetro es:
+
+$$
+\text{IC}_{80\%}(\beta_1) = \left[ \text{cuantil}_{0.10}(\beta_1), \ \text{cuantil}_{0.90}(\beta_1) \right] \approx [`r round(r_b1$lo, 5)`, `r round(r_b1$hi, 5)`]
+$$
+
+La estrechez de este intervalo sugiere una alta precisión en la
+estimación de este coeficiente.
+
+```{r, warning=FALSE}
+plot_posterior(posterior_samples$`beta_1`, "beta_1", expression(beta[1]))
+```
+
+Finalmente, se analiza la distribución posterior del parámetro de forma
+$\alpha$ de la distribución Gamma. Este parámetro está relacionado con
+la dispersión de los datos. Su distribución posterior también presenta
+una forma aproximadamente simétrica, con media cercana a
+$\mu_\alpha \approx$ `r round(r_al$m, 2)`. Como el coeficiente de variación
+del precio en este modelo es $1/\sqrt{\alpha}$, esto equivale a una
+dispersión relativa de aproximadamente un `r round(100 / sqrt(r_al$m))`%
+alrededor de la media.
+
+El intervalo creíble del 80% correspondiente es:
+
+$$
+\text{IC}_{80\%}(\alpha) = \left[ \text{cuantil}_{0.10}(\alpha), \ \text{cuantil}_{0.90}(\alpha) \right] \approx [`r round(r_al$lo, 2)`, `r round(r_al$hi, 2)`]
+$$
+
+Este resultado nos permite cuantificar la incertidumbre sobre la
+dispersión de los precios y es crucial para entender la variabilidad
+implícita en el modelo.
+
+```{r,warning=FALSE}
+plot_posterior(posterior_samples$alpha, "alpha", expression(alpha))
+```
+
+En los tres casos, la visualización incluye la curva de densidad
+posterior, la media del parámetro (línea discontinua roja) y el
+intervalo creíble del 80% (sombra azul). Estas gráficas resumen la
+información sobre cada parámetro: su incertidumbre queda cuantificada
+por la propia distribución posterior.
+
+### Evaluación predictiva con conjunto de test y métrica MAPE
+
+Una vez ajustado el modelo de regresión Gamma simple sobre el conjunto
+de entrenamiento, es fundamental evaluar su capacidad predictiva sobre
+observaciones no utilizadas en el proceso de estimación. Para ello, se
+ha reservado un subconjunto de los datos, denominado conjunto de test,
+con el objetivo de realizar una validación externa.
+
+La métrica utilizada para evaluar el rendimiento predictivo ha sido el
+*Mean Absolute Percentage Error* (MAPE), una medida ampliamente empleada
+en modelos de predicción que cuantifica el error porcentual promedio
+entre las predicciones del modelo y los valores reales:
+
+$$
+\text{MAPE} = \frac{100}{n} \sum_{i=1}^{n} \left| \frac{y_i - \hat{y}_i}{y_i} \right|
+$$
+
+donde $y_i$ representa el valor real del precio de la vivienda y
+$\hat{y}_i$ la predicción generada por el modelo para la observación $i$
+en el conjunto de validación.
+
+A partir del conjunto de validación, se ha evaluado el rendimiento
+predictivo del modelo de regresión Gamma simple entrenado previamente.
+La métrica empleada ha sido el \textit{Mean Absolute Percentage Error}
+(MAPE), obteniéndose un valor de:
+
+```{r, warning=FALSE}
+
+# Calcular medias posteriores de los parámetros
+beta_hat <- colMeans(posterior_samples[, grep("^beta", colnames(posterior_samples))])
+alpha_hat <- mean(posterior_samples[, "alpha"])
+
+# Preparar matriz de variables predictoras para el conjunto de test
+X_test <- as.matrix(df_validation_cv$size_m2) 
+X_test <- cbind(1, X_test) 
+
+# Calcular predicciones puntuales (media de la distribución Gamma)
+mu_hat <- exp(X_test %*% beta_hat)
+
+# Cargar valores reales
+y_real <- df_validation_cv$price
+
+# Calcular el MAPE
+mape <- mean(abs((y_real - mu_hat) / y_real)) * 100
+
+# Mostrar resultado
+res$gamma <- mape
+cat("MAPE:", round(mape, 2), "%\n")
+
+```
+
+Este resultado indica que, en promedio, las predicciones del modelo
+difieren en aproximadamente un `r round(res$gamma, 2)`% respecto a los
+precios reales de las viviendas en la muestra de test. Aunque esta magnitud de error no es
+despreciable, resulta razonable en modelos de precios donde existe una
+alta variabilidad intrínseca en los datos.
+
+Dicho valor sugiere que el modelo es capaz de capturar parte de la
+estructura subyacente de los datos, aunque aún existe margen de mejora.
+Para reducir el MAPE en futuras versiones del modelo, se podrían
+explorar enfoques como:
+
+-   Incluir variables explicativas adicionales (por ejemplo, número de
+    baños, ubicación categórica o tamaño del terreno).
+
+-   Utilizar transformaciones de las variables predictoras o respuestas.
+
+-   Emplear modelos jerárquicos o no lineales (como regresión spline o
+    modelos Gaussianos).
+
+En definitiva, el modelo ofrece una base interpretable y funcional,
+aunque puede beneficiarse de mayor complejidad estructural o
+informacional para afinar la precisión predictiva.
+
+## Modelo jerárquico con intercepto y pendiente aleatorios: comparando agrupamientos
+
+En este apartado queremos ir un paso más allá y probar un modelo aún más
+flexible que los que habíamos usado antes. Hasta ahora, solo permitíamos
+que el precio base de la vivienda cambiase entre zonas. Pero pensándolo
+bien, también puede pasar que el efecto de los metros cuadrados sobre el
+precio varíe mucho según el barrio. Por ejemplo, en el centro cada metro
+cuadrado puede valer mucho más que en una zona más alejada.
+
+Por eso, vamos a ajustar un modelo jerárquico que deja variar tanto el
+intercepto como el "slope" de los metros cuadrados según la zona.
+Además, queremos ver qué pasa si agrupamos las casas de dos formas
+distintas:
+
+-   por código postal (más detallado),
+
+-   por tipo de ubicación (menos grupos).
+
+Así podremos comparar si nos conviene más un agrupamiento muy detallado
+o uno más general.
+
+El modelo se puede escribir así: $$
+\begin{aligned}
+    & y_i \sim \mathrm{Gamma}(\alpha, \beta_i) \\[10pt]
+    & \mathbb{E}[y_i] = \mu_i = \frac{\alpha}{\beta_i} \\[10pt]
+    & \log(\mu_i) = \alpha_{\mathrm{zona}[i]} + \beta_{1,\,\mathrm{zona}[i]} \cdot \mathrm{size\_m2}_i
+      + \gamma_1\, \mathrm{beds}_i + \gamma_2\, \mathrm{baths}_i + \gamma_3\, \mathrm{lot\_size\_m2}_i
+\end{aligned}
+$$
+
+O sea, el logaritmo de la media del precio depende de:
+
+-   un intercepto por zona
+
+-   un coeficiente de los metros cuadrados que también es distinto según
+    la zona
+
+-   el resto de variables que si que tienen un efecto igual en todos los
+    grupos.
+
+La idea es que tanto el intercepto como la pendiente para cada zona se
+sacan de una distribución normal:
+
+$$
+\begin{aligned}
+    & \alpha_{\mathrm{zona}} \sim \mathcal{N}(\mu_{\alpha},\, \sigma^2_{\alpha}) \\[10pt]
+    & \beta_{1,\,\mathrm{zona}} \sim \mathcal{N}(\mu_{\beta_1},\, \sigma^2_{\beta_1})
+\end{aligned}
+$$ Si cada zona tuviera un intercepto y una pendiente totalmente
+independientes, podría pasar que una zona con pocas casas acabe
+sobreajustada, solo porque justo en esa zona las casas son muy caras o
+muy baratas. Por eso, usamos una distribución normal para todos los
+interceptos y todas las pendientes, con los mismos parámetros para todas
+las zonas. Esto hace que, aunque cada zona pueda tener su propio valor,
+si una zona no tiene mucha información, el modelo ajusta con la media
+general y no se va a los extremos.
+
+Definamos nuestras prioris en base a que sabemos que el precio medio es
+de unos $800,000$, así que el logaritmo es unos $13.6$.
+
+Estandarizamos todos los predictores (restando la media y dividiendo por
+la desviación típica del conjunto de entrenamiento, valores que también
+se aplican al conjunto de validación). Así, $\mu_{\beta_1}$ y los
+$\gamma_k$ se interpretan como el cambio en el log-precio por cada
+desviación típica del predictor, y la pendiente media tiene sentido
+centrada en cero.
+
+Para definir las priors de nuestro modelo bayesiano, hemos utilizado la
+información descriptiva de nuestro propio conjunto de datos, como la
+media, desviación estándar, mínimo y máximo de cada variable. Esto nos
+permite poner priors realistas y evitar que el modelo explore valores
+que no tienen sentido para nuestro caso.
+
+Por ejemplo, en el conjunto de entrenamiento el precio tiene una media de
+unos `r format(round(mean(df_train_cv$price)), big.mark = ",")` dólares,
+con un mínimo de `r format(round(min(df_train_cv$price)), big.mark = ",")`
+y un máximo de `r format(round(max(df_train_cv$price)), big.mark = ",")`. Por eso, para el intercepto
+global del modelo, hemos elegido una prior normal centrada en el
+logaritmo de la media del precio ($\log(800,000) \approx 13.6$) y con
+una desviación estándar relativamente grande (3), para dejar suficiente
+flexibilidad pero sin irnos a valores irreales.
+
+Así quedan las priors:
+
+$\mu_\alpha \sim \mathcal{N}(13.6, 3^2)$
+
+$\mu_{\beta_1} \sim \mathcal{N}(0, 0.5^2)$
+
+$\gamma_k \sim \mathcal{N}(0, 0.5^2)$
+
+$\sigma_\alpha \sim \mathcal{N}^{+}(0, 1^2), \quad \sigma_{\beta_1} \sim \mathcal{N}^{+}(0, 0.5^2)$
+
+$\alpha \sim \mathrm{Gamma}(2, 0.1)$
+
+Realizamos primero el modelo con agrupación según la variable $zipcode$:
+
+```{r}
+vars_fijos <- c("beds", "baths", "lot_size_m2")
+
+# Estandarización con la media y la desviación típica de TRAIN
+vars_z    <- c("beds", "baths", "size_m2", "lot_size_m2")
+medias_tr <- sapply(df_train_cv[, vars_z], mean)
+sds_tr    <- sapply(df_train_cv[, vars_z], sd)
+escalar <- function(d) {
+  for (v in vars_z) d[[v]] <- (d[[v]] - medias_tr[[v]]) / sds_tr[[v]]
+  d
+}
+df_train_z <- escalar(df_train_cv)
+df_val_z   <- escalar(df_validation_cv)
+
+data_list_zip <- list(
+  N = nrow(df_train_z),
+  K = length(vars_fijos),
+  J = nlevels(df_train_z$zip_code),
+  zone = as.integer(df_train_z$zip_code),
+  size_m2 = df_train_z$size_m2,
+  X = as.matrix(df_train_z[, vars_fijos]),
+  y = df_train_z$price
+)
+```
+
+```{r,warning=FALSE, message=FALSE, results='hide'}
+init_fun <- function() list(
+  mu_alpha = 13.6,
+  mu_beta1 = 0,
+  sigma_alpha = 0.5,
+  sigma_beta1 = 0.2,
+  alpha_zone = rep(13.6, data_list_zip$J),
+  beta1_zone = rep(0, data_list_zip$J),
+  gamma = rep(0, data_list_zip$K),
+  shape = 5
+)
+
+pars_jer <- c("mu_alpha", "mu_beta1", "sigma_alpha", "sigma_beta1",
+              "gamma", "alpha_zone", "beta1_zone", "shape")
+
+# Por código postal
+modelo_zip <- stan(
+  file = "stan_models/gamma_regresion_randomslope.stan",
+  data = data_list_zip,
+  iter = N_ITER, warmup = N_WARMUP, chains = N_CHAINS,
+  seed = 1,
+  init = init_fun,
+  control = list(adapt_delta = 0.95),
+  refresh = 0
+)
+d_zip <- diagnosticos(modelo_zip, pars_jer)
+```
+
+```{r, warning=FALSE,message=FALSE}
+
+print(modelo_zip, pars = c("mu_alpha", "mu_beta1", "sigma_alpha", "sigma_beta1", "gamma", "alpha_zone", "beta1_zone", "shape"))
+```
+
+En este caso, para calcular las distribuciones a posteriori de los parámetros del modelo hemos usado `r N_ITER` iteraciones por cadena (las primeras `r N_WARMUP` de calentamiento) y `r N_CHAINS` cadenas independientes. El $\widehat{R}$ máximo es `r round(d_zip$rhat_max, 3)`, el $n_{eff}$ mínimo es `r round(d_zip$neff_min)` y hay `r d_zip$divergencias` transiciones divergentes, `r veredicto(d_zip)`. Además,
+podemos ver la convergencia también en los siguientes gráficos, donde
+vemos las cadenas a lo largo de las iteraciones de los parámetros
+principales (y en la siguiente figura sus distribuciones Posteriori):
+
+```{r, warning=FALSE}
+posterior <- as.matrix(modelo_zip)
+
+mcmc_trace(modelo_zip, pars = c("mu_alpha", "mu_beta1", "sigma_alpha", "sigma_beta1", "shape"))
+```
+
+Los gráficos de las distribuciones posteriores de los parámetros del
+modelo jerárquico han sido trasladados a la primera sección del apéndice
+con el fin de no sobrecargar el cuerpo principal del documento y
+facilitar una lectura más fluida del análisis.
+
+Estos gráficos pueden consultarse en la sección
+titulada **"Distribuciones posteriores de los parámetros"** del apéndice
+para este modelo.
+
+Por último evaluamos el MAPE del modelo:
+
+```{r}
+alpha_zone_hat <- colMeans(posterior[, grep("^alpha_zone\\[", colnames(posterior))])
+beta1_zone_hat <- colMeans(posterior[, grep("^beta1_zone\\[", colnames(posterior))])
+gamma_hat <- colMeans(posterior[, grep("^gamma\\[", colnames(posterior))])
+
+X_val <- as.matrix(df_val_z[, vars_fijos])
+size_m2_val <- df_val_z$size_m2
+
+zone_val <- as.integer(df_val_z$zip_code)
+
+log_mu_val <- alpha_zone_hat[zone_val] +
+              beta1_zone_hat[zone_val] * size_m2_val +
+              as.numeric(X_val %*% gamma_hat)
+
+y_pred_test <- exp(log_mu_val)
+
+y_real <- df_validation_cv$price
+mape <- mean(abs((y_real - y_pred_test) / y_real)) * 100
+
+res$zip <- mape
+print(paste("MAPE:", round(mape, 2), "%"))
+
+```
+
+Hemos obtenido un MAPE del `r round(res$zip, 2)`%`r if (res$zip < min(res$pooled, res$gamma)) ", el mejor MAPE hasta ahora" else ""`. Vemos qué
+pasa cuando calibramos el modelo jerárquico según la agrupación
+"location_group" y usando las mismas variables:
+
+```{r,warning=FALSE, message=FALSE, results='hide'}
+data_list_group <- list(
+  N = nrow(df_train_z),
+  K = length(vars_fijos),
+  J = nlevels(df_train_z$location_group),
+  zone = as.integer(df_train_z$location_group),
+  size_m2 = df_train_z$size_m2,
+  X = as.matrix(df_train_z[, vars_fijos]),
+  y = df_train_z$price
+)
+
+init_fun_group <- function() list(
+  mu_alpha = 13.6,
+  mu_beta1 = 0,
+  sigma_alpha = 0.5,
+  sigma_beta1 = 0.2,
+  alpha_zone = rep(13.6, data_list_group$J),
+  beta1_zone = rep(0, data_list_group$J),
+  gamma = rep(0, data_list_group$K),
+  shape = 5
+)
+
+# Por grupo de ubicación
+modelo_group <- stan(
+  file = "stan_models/gamma_regresion_randomslope.stan",
+  data = data_list_group,
+  iter = N_ITER, warmup = N_WARMUP, chains = N_CHAINS,
+  seed = 1,
+  init = init_fun_group,
+  control = list(adapt_delta = 0.95),
+  refresh = 0
+)
+d_group <- diagnosticos(modelo_group, pars_jer)
+```
+
+```{r,warning=FALSE,message=FALSE}
+print(modelo_group, pars = c("mu_alpha", "mu_beta1", "sigma_alpha", "sigma_beta1", "gamma", "alpha_zone", "beta1_zone", "shape"))
+```
+
+En este caso, para calcular las distribuciones a posteriori de los parámetros del modelo hemos usado `r N_ITER` iteraciones por cadena (las primeras `r N_WARMUP` de calentamiento) y `r N_CHAINS` cadenas independientes. El $\widehat{R}$ máximo es `r round(d_group$rhat_max, 3)`, el $n_{eff}$ mínimo es `r round(d_group$neff_min)` y hay `r d_group$divergencias` transiciones divergentes, `r veredicto(d_group)`. Además,
+podemos ver la convergencia también en los siguientes gráficos, donde
+vemos las cadenas a lo largo de las iteraciones de los parámetros
+principales (y en la siguiente figura sus distribuciones Posteriori):
+
+```{r}
+posterior <- as.matrix(modelo_group)
+
+mcmc_trace(modelo_group, pars = c("mu_alpha", "mu_beta1", "sigma_alpha", "sigma_beta1", "shape"))
+```
+
+Al igual que en el caso anterior, los gráficos correspondientes a las
+distribuciones posteriores de este modelo han sido ubicados en el
+apéndice para no interrumpir la continuidad del análisis principal.
+
+Por último evaluamos el MAPE del modelo:
+
+```{r}
+alpha_zone_hat <- colMeans(posterior[, grep("^alpha_zone\\[", colnames(posterior))])
+beta1_zone_hat <- colMeans(posterior[, grep("^beta1_zone\\[", colnames(posterior))])
+gamma_hat <- colMeans(posterior[, grep("^gamma\\[", colnames(posterior))])
+
+X_val <- as.matrix(df_val_z[, vars_fijos])
+size_m2_val <- df_val_z$size_m2
+
+zone_val <- as.integer(df_val_z$location_group)
+
+log_mu_val <- alpha_zone_hat[zone_val] +
+              beta1_zone_hat[zone_val] * size_m2_val +
+              as.numeric(X_val %*% gamma_hat)
+
+y_pred_test <- exp(log_mu_val)
+
+y_real <- df_validation_cv$price
+mape <- mean(abs((y_real - y_pred_test) / y_real)) * 100
+
+res$group <- mape
+print(paste("MAPE:", round(mape, 2), "%"))
+
+```
+
+El MAPE con la agrupación por `location_group` es `r round(res$group, 2)`%,
+`r if (res$group > res$zip) "peor" else "mejor"` que con `zip_code`
+(`r round(res$zip, 2)`%). Entre los dos agrupamientos, en este conjunto de
+validación ofrece mejor capacidad predictiva
+`r if (res$zip < res$group) "el código postal" else "el tipo de ubicación"`.
+
+### Efectos estimados en el modelo jerárquico por código postal
+
+Para interpretar el modelo, resumimos los efectos como cambio porcentual del
+precio esperado por cada desviación típica del predictor
+($100\,(e^{\beta}-1)$), con su intervalo creíble del 80%, y las pendientes
+de superficie por código postal (solo códigos con al menos 20 viviendas en
+entrenamiento, para que la estimación sea fiable).
+
+```{r, warning=FALSE, message=FALSE}
+post_zip <- rstan::extract(modelo_zip)
+pct <- function(x) 100 * (exp(x) - 1)
+resumen_pct <- function(x) c(media = mean(pct(x)),
+                             p10 = unname(quantile(pct(x), 0.10)),
+                             p90 = unname(quantile(pct(x), 0.90)))
+
+efectos_fijos <- rbind(
+  "Superficie (media entre zonas)" = resumen_pct(post_zip$mu_beta1),
+  "Dormitorios"                    = resumen_pct(post_zip$gamma[, 1]),
+  "Baños"                          = resumen_pct(post_zip$gamma[, 2]),
+  "Terreno (lot_size_m2)"          = resumen_pct(post_zip$gamma[, 3])
+)
+knitr::kable(round(efectos_fijos, 1), col.names = c("Media (%)", "P10 (%)", "P90 (%)"))
+
+zonas <- levels(df_train_z$zip_code)
+pend <- data.frame(
+  zip = zonas,
+  n_train = as.integer(table(df_train_z$zip_code)[zonas]),
+  efecto_pct = apply(post_zip$beta1_zone, 2, function(x) mean(pct(x)))
+)
+pend20 <- pend[pend$n_train >= 20, ]
+pend20 <- pend20[order(pend20$efecto_pct), ]
+tabla_pend <- rbind(head(pend20, 3), tail(pend20, 3))
+rownames(tabla_pend) <- NULL
+knitr::kable(transform(tabla_pend, efecto_pct = round(efecto_pct, 1)),
+             col.names = c("Código postal", "Viviendas en train", "Efecto superficie (%)"))
+```
+
+Los efectos de superficie están expresados por cada desviación típica de
+`size_m2` (`r round(sds_tr[["size_m2"]])` m$^2$ en entrenamiento).
+
+## Modelos no bayesianos
+
+Después de entrenar los modelos bayesiano, queríamos comparar sus
+rendimiento con el de modelos clásicos no bayesianos de regresión Gamma.
+El objetivo de esto es ver si el enfoque bayesiano realmente nos aporta
+una ventaja en la predicción, o si con modelos más simples podríamos
+obtener resultados similares. Para que la comparación sea justa, hemos
+calculado el MAPE (Mean Absolute Percentage Error) para todos los
+modelos sobre la misma muestra de validación.
+
+El primer modelo que hemos probado es una regresión lineal clásica,
+donde ajustamos el precio de la vivienda directamente como una
+combinación lineal de las variables estructurales y de la localización:
+$$
+\begin{aligned}
+\mathrm{price}_i &= \beta_0 + \beta_1 \cdot \mathrm{beds}_i + \beta_2 \cdot \mathrm{baths}_i
+  + \beta_3 \cdot \mathrm{size\_m2}_i + \beta_4 \cdot \mathrm{lot_size_m2}_i
+  + \sum_{g=1}^{G} \gamma_g \cdot \mathrm{location_group}_{i,g} + \varepsilon_i
+\end{aligned}
+$$
+
+donde $\varepsilon_i \sim \mathcal{N}(0, \sigma^2)$.
+
+```{r, warning=FALSE, message=FALSE}
+lm_model <- lm(
+  price ~ beds + baths + size_m2 + lot_size_m2 + location_group,
+  data = df_train_cv
+)
+
+y_pred_lm <- predict(lm_model, newdata = df_validation_cv)
+y_real <- df_validation_cv$price
+
+mape_lm <- mean(abs((y_real - y_pred_lm) / y_real)) * 100
+res$lm <- mape_lm
+print(paste("MAPE regresión lineal:", round(mape_lm, 2), "%"))
+
+```
+
+Nuestro segundo modelo no bayesiano es un modelo no paramétrico de
+machine learning, el Random Forest:
+
+$$
+\widehat{y}_i = \frac{1}{B} \sum_{b=1}^{B} T_b(\mathbf{x}_i)
+$$ donde:
+
+-   $B$ es el número de árboles
+
+-   $T_b(\mathbf{x}_i)$ es la predicción del árbol $b$ para el individuo
+    $i$ a partir de sus características $\mathbf{x}_i$.
+
+```{r, warning=FALSE, message=FALSE}
+library(randomForest)
+set.seed(123)
+
+rf_model <- randomForest(
+  price ~ beds + baths + size_m2 + lot_size_m2 + location_group,
+  data = df_train_cv,
+  ntree = 200
+)
+
+y_pred_rf <- predict(rf_model, newdata = df_validation_cv)
+y_real <- df_validation_cv$price
+
+mape_rf <- mean(abs((y_real - y_pred_rf) / y_real)) * 100
+res$rf_group <- mape_rf
+print(paste("MAPE Random Forest:", round(mape_rf, 2), "%"))
+
+```
+
+Y por último hemos realizado una regresión gamma: $$
+\mathrm{price}_i \sim \mathrm{Gamma}(\alpha, \beta_i)
+$$ $$
+\log(\mu_i) = \beta_0 + \beta_1 \cdot \mathrm{beds}_i + \beta_2 \cdot \mathrm{baths}_i + \beta_3 \cdot \mathrm{size_m2}_i + \beta_4 \cdot \mathrm{lot_size_m2}_i + \sum_{g=1}^{G} \gamma_g \cdot \mathrm{location_group}_{i,g}
+$$ $$
+\mu_i = \mathbb{E}[\mathrm{price}_i] = \frac{\alpha}{\beta_i}
+$$
+
+```{r, warning=FALSE,message=FALSE}
+glm_group <- glm(
+  price ~ beds + baths + size_m2 + lot_size_m2 + location_group,
+  family = Gamma(link = "log"),
+  data = df_train_cv
+)
+
+y_pred_group <- predict(glm_group, newdata = df_validation_cv, type = "response")
+
+# MAPE
+y_real <- df_validation_cv$price
+mape_group <- mean(abs((y_real - y_pred_group) / y_real)) * 100
+res$glm_group <- mape_group
+print(paste("MAPE GLM con grupo:", round(mape_group, 2), "%"))
+```
+
+Estos tres modelos usan `location_group` como variable de localización,
+mientras que el mejor modelo bayesiano usa `zip_code`. Para que la
+comparación sea justa, ajustamos también el GLM Gamma y el Random Forest
+con `zip_code`:
+
+```{r, warning=FALSE, message=FALSE}
+glm_zip <- glm(
+  price ~ beds + baths + size_m2 + lot_size_m2 + zip_code,
+  family = Gamma(link = "log"),
+  data = df_train_cv
+)
+vistos <- df_validation_cv$zip_code %in% unique(as.character(df_train_cv$zip_code))
+y_pred_glm_zip <- y_pred_group
+y_pred_glm_zip[vistos] <- predict(glm_zip, newdata = df_validation_cv[vistos, ], type = "response")
+res$glm_zip <- mape_fun(df_validation_cv$price, y_pred_glm_zip)
+n_no_vistos <- sum(!vistos)
+
+set.seed(123)
+rf_zip <- randomForest(
+  price ~ beds + baths + size_m2 + lot_size_m2 + zip_code,
+  data = df_train_cv,
+  ntree = 200
+)
+y_pred_rf_zip <- predict(rf_zip, newdata = df_validation_cv)
+res$rf_zip <- mape_fun(df_validation_cv$price, y_pred_rf_zip)
+
+print(paste("MAPE GLM Gamma con zip_code:", round(res$glm_zip, 2), "%"))
+print(paste("MAPE Random Forest con zip_code:", round(res$rf_zip, 2), "%"))
+```
+
+Los MAPE de todos los modelos se resumen en la tabla de conclusiones.
+
+# Conclusiones
+
+Tras una exploración completa de los datos y la estimación de varios
+modelos, podemos extraer una serie de conclusiones sobre el mercado
+inmobiliario de Seattle y sobre el valor añadido de un enfoque
+bayesiano:
+
+El efecto de la superficie es positivo en todos los modelos, confirmando
+la intuición de que a mayor espacio interior, mayor es el precio. En el
+modelo jerárquico por código postal, una desviación típica más de
+superficie (`r round(sds_tr[["size_m2"]])` m$^2$) se asocia, de media, a un
+aumento del precio esperado del `r round(efectos_fijos["Superficie (media entre zonas)", "media"], 1)`%.
+Al permitir pendientes específicas por zona observamos cierta
+heterogeneidad: entre los códigos postales con al menos 20 viviendas, el
+efecto de la superficie va desde un `r round(pend20$efecto_pct[1], 1)`%
+(código `r pend20$zip[1]`) hasta un `r round(pend20$efecto_pct[nrow(pend20)], 1)`%
+(código `r pend20$zip[nrow(pend20)]`) por desviación típica.
+
+En cuanto al resto de variables, el efecto medio de una desviación típica
+más es de `r round(efectos_fijos["Dormitorios", "media"], 1)`% en el
+número de dormitorios, `r round(efectos_fijos["Baños", "media"], 1)`% en el
+de baños y `r round(efectos_fijos["Terreno (lot_size_m2)", "media"], 1)`% en
+el terreno exterior (intervalos creíbles en la tabla de efectos).
+
+Desde el punto de vista predictivo, la tabla siguiente resume el MAPE en
+validación de todos los modelos probados (bayesianos y clásicos):
+
+```{r}
+tabla_res <- data.frame(
+  Modelo = c("Pooled Normal (bayesiano)",
+             "Gamma simple (bayesiano)",
+             "Jerárquico Gamma por zip_code (bayesiano)",
+             "Jerárquico Gamma por location_group (bayesiano)",
+             "Regresión lineal (location_group)",
+             "GLM Gamma (location_group)",
+             "GLM Gamma (zip_code)",
+             "Random Forest (location_group)",
+             "Random Forest (zip_code)"),
+  MAPE = round(unlist(res[c("pooled", "gamma", "zip", "group", "lm",
+                            "glm_group", "glm_zip", "rf_group", "rf_zip")]), 2)
+)
+tabla_res <- tabla_res[order(tabla_res$MAPE), ]
+rownames(tabla_res) <- NULL
+knitr::kable(tabla_res, col.names = c("Estrategia", "MAPE (%)"))
+
+min_b <- min(res$pooled, res$gamma, res$zip, res$group)
+min_c <- min(res$lm, res$glm_group, res$glm_zip, res$rf_group, res$rf_zip)
+```
+
+El modelo con menor MAPE es **`r tabla_res$Modelo[1]`** (`r tabla_res$MAPE[1]`%).
+El mejor modelo bayesiano tiene un MAPE de `r round(min_b, 2)`% y el mejor
+clásico de `r round(min_c, 2)`%, una diferencia de
+`r round(abs(min_b - min_c), 2)` puntos porcentuales. Con una única
+partición train/test, `r if (abs(min_b - min_c) < 1.5) "una diferencia tan pequeña no permite afirmar que un enfoque supere al otro" else "esta diferencia es apreciable, aunque debería confirmarse con otras particiones"`.
+Lo que sí aporta el enfoque bayesiano jerárquico es la cuantificación
+de la incertidumbre de cada parámetro y la posibilidad de compartir
+información entre zonas con pocas viviendas.
+
+Como limitaciones, el estudio se basa en una sola partición de los
+datos, usa predicciones puntuales a partir de las medias posteriores y
+cubre solo unos meses de 2022. De cara a continuar con este estudio,
+una línea futura de trabajo podría ser ampliar las variables (por
+ejemplo, la antigüedad de las viviendas), comparar los modelos con
+validación cruzada o criterios como LOO, y ampliar la dimensión temporal
+para modelar la evolución del precio desde el punto de vista bayesiano.
+
+# Bibliografía
+
+-   **Balaji Rajagopalan.** (s.f.). *Bayesian Statistics: A Review and
+    Reconsideration*. Recuperado
+    de <https://civil.colorado.edu/~balajir/CVEN6833/bayes-resources/RM-StatRethink-Bayes.pdf>
+
+-   **Sparks, C.** (2018). *Bayesian regression using brms and Stan*.
+    RPubs. Recuperado de <https://rpubs.com/corey_sparks/420770>
+
+-   **Gelman, A., Carlin, J. B., Stern, H. S., Dunson, D. B., Vehtari,
+    A., & Rubin, D. B.** (2013). *Bayesian Data Analysis*(3.ª ed.). CRC
+    Press.\
+    Apéndice de modelos Stan disponible en línea:
+    <https://statmodeling.stat.columbia.edu/2020/04/06/bda-free-bayesian-data-analysis-now-available-online-as-pdf/>
+
+# Apéndice
+
+## Distribuciones posteriores de los parámetros
+
+### Hierarchical Gamma (intercepto + pendiente) agrupado por zip_code
+
+```{r, warning = FALSE}
+posterior_samples <- as.data.frame(rstan::extract(modelo_zip))
+par(mfrow=c(3,3))
+plot_posterior(posterior_samples$mu_alpha, "mu_alpha", expression(mu_alpha[0]))
+plot_posterior(posterior_samples$mu_beta1, "mu_beta1", expression(mu_beta1[0]))
+plot_posterior(posterior_samples$sigma_alpha, "sigma_alpha", expression(sigma_alpha[0]))
+plot_posterior(posterior_samples$sigma_beta1, "sigma_beta1", expression(sigma_beta1[0]))
+plot_posterior(posterior_samples$alpha_zone.1, "alpha_zone.1", expression(alpha_zone.1[0]))
+plot_posterior(posterior_samples$alpha_zone.2, "alpha_zone.2", expression(alpha_zone.2[0]))
+plot_posterior(posterior_samples$alpha_zone.3, "alpha_zone.3", expression(alpha_zone.3[0]))
+plot_posterior(posterior_samples$alpha_zone.4, "alpha_zone.4", expression(alpha_zone.4[0]))
+plot_posterior(posterior_samples$alpha_zone.5, "alpha_zone.5", expression(alpha_zone.5[0]))
+
+par(mfrow=c(1,1))
+```
+
+### Hierarchical Gamma (intercepto + pendiente) agrupado por *location_group*
+
+```{r, warning = FALSE}
+posterior_samples <- as.data.frame(rstan::extract(modelo_group))
+par(mfrow=c(3,3))
+plot_posterior(posterior_samples$mu_alpha, "mu_alpha", expression(mu_alpha[0]))
+plot_posterior(posterior_samples$mu_beta1, "mu_beta1", expression(mu_beta1[0]))
+plot_posterior(posterior_samples$sigma_alpha, "sigma_alpha", expression(sigma_alpha[0]))
+plot_posterior(posterior_samples$sigma_beta1, "sigma_beta1", expression(sigma_beta1[0]))
+plot_posterior(posterior_samples$alpha_zone.1, "alpha_zone.1", expression(alpha_zone.1[0]))
+plot_posterior(posterior_samples$alpha_zone.2, "alpha_zone.2", expression(alpha_zone.2[0]))
+plot_posterior(posterior_samples$alpha_zone.3, "alpha_zone.3", expression(alpha_zone.3[0]))
+plot_posterior(posterior_samples$alpha_zone.4, "alpha_zone.4", expression(alpha_zone.4[0]))
+plot_posterior(posterior_samples$alpha_zone.5, "alpha_zone.5", expression(alpha_zone.5[0]))
+
+par(mfrow=c(1,1))
+```
+
+```{r, include=FALSE}
+write.csv(tabla_res, "resultados_mape.csv", row.names = FALSE)
+```
+
+## Modelos STAN
+
+Los modelos se encuentran en la carpeta `stan_models/`.
+
+### Modelo Pooled
+
+```{r, comment=""}
+cat(readLines("stan_models/modelo_regresion.stan"), sep = "\n")
+```
+
+### Modelo Regresión Gamma Simple
+
+```{r, comment=""}
+cat(readLines("stan_models/gamma_regresion.stan"), sep = "\n")
+```
+
+### Modelo Hierarchical Gamma (intercepto + pendiente)
+
+```{r, comment=""}
+cat(readLines("stan_models/gamma_regresion_randomslope.stan"), sep = "\n")
+```
+
+## Información de la sesión
+
+```{r, comment=""}
+sessionInfo()
+```

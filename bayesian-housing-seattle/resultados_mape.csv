@@ -1,0 +1,10 @@
+"Modelo","MAPE"
+"Random Forest (zip_code)",20.91
+"Jerárquico Gamma por zip_code (bayesiano)",20.92
+"GLM Gamma (zip_code)",21.26
+"Random Forest (location_group)",23.59
+"Regresión lineal (location_group)",24.12
+"Jerárquico Gamma por location_group (bayesiano)",24.44
+"GLM Gamma (location_group)",24.49
+"Pooled Normal (bayesiano)",24.9
+"Gamma simple (bayesiano)",26.93
