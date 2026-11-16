@@ -1,0 +1,1777 @@
+---
+output:
+  pdf_document:
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    keep_tex: true
+    pandoc_args:
+      - "--variable"
+      - "geometry:margin=2cm"
+      - "--variable"
+      - "fontsize=10pt"
+      - "--variable"
+      - "monofont=Courier New"
+---
+
+```{=tex}
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+{\Huge\bfseries Housing Price Analysis According to Property Characteristics \par}
+\vspace{1cm}
+
+{\large Quantitative Marketing Techniques \par}
+\vspace{1cm}
+
+
+{\Large Laura, Maria and Pablo \par}
+\vspace{1cm}
+
+{\large May 14, 2025 \par}
+\vfill
+
+{\large Universitat Politècnica de Catalunya \par}
+{\large Màster en Estadística i Investigació Operativa \par}
+
+\end{titlepage}
+```
+```{=tex}
+\newpage
+\tableofcontents
+\newpage
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  tidy = FALSE,
+  comment = NA,
+  results = 'markup'
+)
+```
+
+```{r libs, warning = FALSE, message = FALSE, include = FALSE}
+# Imports
+library(readxl)
+library(FactoMineR)
+library(factoextra)
+library(ca)
+library(tidyverse)   # includes dplyr and ggplot2
+library(gridExtra)
+library(reshape2)
+library(class)
+library(deldir)
+library(e1071)  # For the naiveBayes function
+library(caret)  # For data splitting and model evaluation
+library(randomForest)
+library(Metrics)
+library(kknn)
+library(corrplot)
+library(hopkins)
+
+# Neural network (Keras / TensorFlow). If it is not installed, the neural
+# network chunks are skipped and the rest of the report still knits.
+# To install it once: keras::install_keras()
+nn_ok <- requireNamespace("keras", quietly = TRUE) &&
+  tryCatch({ library(keras); library(tensorflow); !is.null(tf$constant(1)) },
+           error = function(e) FALSE)
+```
+
+\newpage
+
+# Dataset and Goal
+
+The dataset used in this project is sourced from Kaggle and is focused on house price prediction. It contains information on 2,000 houses and includes a combination of quantitative and categorical variables that describe various physical, temporal, and qualitative characteristics of the properties. Below is a brief description of each variable:
+
+**Id**: A unique identifier assigned to each property. It does not carry analytical value and will be excluded from statistical modeling.
+
+**Area**: Represents the total surface area of the house. This is a continuous numeric variable that likely reflects the size of the living space, which is expected to be a major driver of price.
+
+**Bedrooms and Bathrooms**: These discrete numeric variables indicate the number of bedrooms and bathrooms, respectively. These features are key indicators of house capacity and usability.
+
+**Floors**: A discrete variable indicating the number of floors in the house. It may influence both space distribution and pricing.
+
+**YearBuilt**: The year the property was constructed. It allows for calculating the house’s age and can relate to the condition or design trends influencing price.
+
+**Location**: A nominal categorical variable representing the geographic area where the house is situated, it has four categories : Downtown, Suburban, Urban and Rural. Location is often one of the most important determinants of property value.
+
+**Condition**: A subjective and ordinal categorical variable indicating the general state of the property, it has four categories: Excellent, Good, Fair and Poor. This reflects the overall quality and upkeep, which likely impacts buyer perception and price.
+
+**Garage**: A binary categorical variable indicating the presence of a garage. As a convenience feature, it can affect property value and attractiveness to buyers.
+
+**Price**: The target variable, representing the market price of the house. This is the main outcome of interest and will be analyzed in relation to all other variables.
+
+The dataset is ideal for building predictive models and exploring relationships between housing characteristics and prices. With the data available, it supports a supervised learning approach to estimating real estate values.
+
+```{r, warning = FALSE}
+# Read the Excel file (it must be placed in the data/ folder, see data/README.md)
+if (!file.exists("data/FW_DATASET.xlsx")) {
+  stop("Dataset not found: place FW_DATASET.xlsx in the data/ folder (see data/README.md).")
+}
+data <- read_excel("data/FW_DATASET.xlsx")
+
+# First few rows
+head(data)
+```
+
+In this project, our primary objectives are:
+
+1.  Identify and understand the main factors influencing house prices. We aim to explore the relationships between different house attributes—such as area, number of bedrooms and bathrooms, location, and condition—and how they impact the final sale price.
+
+2.  Group houses into similar categories based on features such as size, condition, and location. Using clustering and other unsupervised learning techniques, we intend to segment the houses into meaningful groups to better understand patterns in the housing market.
+
+3.  Predict house prices by categorizing them into predefined price ranges. For the supervised learning part, we will build models that classify houses into price brackets (e.g., low, medium, high), based on their features.
+
+For the supervised learning component of this project, our **target variable** is:
+
+-   **`Price`**: the final sale price of each house, which we aim to predict or categorize using the other variables in the dataset.
+
+Before applying predictive methods such as classification, clustering, and neural networks, we will first investigate the structure and quality of the dataset through three key statistical tests:
+
+**1 . Correlation matrix and heatmap for numerical variables**, to assess the presence of linear relationships between features.
+
+**2 . Chi-squared test of independence** to determine whether there are statistically significant associations between categorical variables and price categories.
+
+**3 . ANOVA test**, to compare mean prices across different groups defined by categorical variables such as Condition, Garage, and Location.
+
+These tests will help us understand the internal consistency and informative value of the dataset. If the results suggest weak or non-existent relationships among variables, this may limit the performance and interpretability of the statistical and machine learning models used later in the project. In other words, poor data structure could lead to limited predictive power, regardless of the complexity of the models applied.
+
+We will start by doing the correlation matrix for the numerical variables.
+
+```{r, warning = FALSE}
+# Select only numeric columns
+numeric_data <- data[, sapply(data, is.numeric)]
+numeric_data <- numeric_data[, !colnames(numeric_data) %in% "Id"]
+# Compute correlation matrix
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Display the correlation matrix
+print(cor_matrix)
+
+# Plot heatmap
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black", 
+         tl.srt = 45)
+```
+
+The correlation matrix clearly indicates a lack of substantial linear relationships between the variables. Most correlation values are close to 0, suggesting that the features are largely uncorrelated. The highest observed correlation is between Floors and Price (0.055), which is still very weak.
+
+The absence of significant correlations implies that the predictive power of the models is likely limited, as there are no strong linear relationships to exploit.
+
+We will continue by applying the Chi-squared test of Independence of the categorical variable of the Price with the other categorical variables, this will help to determine whether there is a statistically significant association between the categorical version of Price and each of the other categorical variables.
+
+```{r, warning = FALSE}
+# Create a categorical version of Price using quintiles
+data$Price_cat <- cut(data$Price,
+                      breaks = quantile(data$Price, 
+                                        probs = seq(0, 1, length.out = 6), 
+                                        na.rm = TRUE),
+                      labels = c("Very Low", "Low", "Medium", "High", 
+                                 "Very High"),
+                      include.lowest = TRUE)
+# Chi-squared test: Price_cat vs Garage
+print(chisq.test(table(data$Price_cat, data$Garage)))
+
+# Chi-squared test: Price_cat vs Location
+print(chisq.test(table(data$Price_cat, data$Location)))
+
+# Chi-squared test: Price_cat vs Condition
+print(chisq.test(table(data$Price_cat, data$Condition)))
+
+```
+
+The chi-squared tests reveal no significant associations between Price (categorized into quintiles) and the categorical variables Garage and Location. However, there is a borderline association between Condition and Price (p-value = 0.05856). Therefore, we will proceed with an ANOVA test to compare the mean Price across different Condition categories. We will also do it for the other categorical variables.
+
+```{r, warning = FALSE}
+anova_condition <- aov(Price ~ Condition, data = data)
+summary(anova_condition)
+anova_location <- aov(Price ~ Location, data = data)
+summary(anova_location)
+anova_garage <- aov(Price ~ Garage, data = data)
+summary(anova_garage)
+```
+
+None of the categorical variables (Condition, Location, Garage) show statistically significant differences in mean Price, as all p-values are well above the 0.05 threshold. This aligns with previous findings from the chi-squared tests.
+
+# Basic common part
+
+The basic common part involves establishing an objective adapted to the chosen data set, and analyzing and comparing from two points of view: a descriptive factor analysis followed by classification, and clustering.
+
+## Principal component analysis (PCA)
+
+The objective of applying Principal Component Analysis (PCA) is to reduce the dimensionality of the dataset while preserving as much of the original variability as possible. PCA transforms a set of potentially correlated quantitative variables into a smaller number of uncorrelated components, allowing for a more efficient and interpretable analysis. In the context of our housing dataset, PCA allows us to:
+
+1.  Identify underlying patterns or structures among the housing features.
+
+2.  Visualize relationships between individual houses and key variables.
+
+3.  Understand how quantitative features contribute to differences in house pricing profiles.
+
+4.  Detect trends, groupings, and outliers that may inform later clustering and classification analyses.
+
+We will apply PCA to the following quantitative variables: **Area**, **Bedrooms**, **Bathrooms**, **Floors**, **YearBuilt** and **Price**.
+
+These variables are measured on different scales, so we will standardize them prior to the analysis to ensure that each contributes equally to the resulting components.
+
+To enrich our interpretation of the PCA, we will also project the following categorical variables as supplementary qualitative variables: Location, Condition and Garage.
+
+These supplementary variables do not influence the construction of the principal components, but their projection onto the PCA space will help us better understand how different housing profiles relate to the underlying structure.
+
+This analysis serves as a foundation for subsequent clustering techniques by revealing natural patterns and dimensional relationships within the data.
+
+```{r, Warning = FALSE}
+# Convert categorical variables to factors
+data$Location <- as.factor(data$Location)
+data$Condition <- as.factor(data$Condition)
+data$Garage <- as.factor(data$Garage)
+
+# Select and scale the quantitative variables
+quant_scaled <- scale(data[, c("Area", "Bedrooms", "Bathrooms", "Floors", 
+                               "YearBuilt", "Price")])
+
+# Combine scaled quantitative data with categorical variables
+data_pca <- data.frame(quant_scaled,
+                       Location = data$Location,
+                       Condition = data$Condition,
+                       Garage = data$Garage)
+
+# Perform PCA
+res_pca <- PCA(data_pca, quali.sup = 7:9, graph = FALSE)
+#Explained variance
+res_pca$eig
+# Plot of variance explained
+fviz_eig(res_pca, addlabels = TRUE, ylim = c(0, 60))
+```
+
+No single axis dominates the variability. The first three dimensions explain just over 52% of the total variance, which suggests the structure is somewhat distributed—so plotting the first two dimensions may help, but we should look at more if possible.
+
+```{r, warning = FALSE}
+#variable contributions
+res_pca$var$contrib
+res_pca$var$cor
+```
+
+Below is a detailed interpretation of how the variables contribute and relate to the main dimensions.
+
+**Dimension 1** (Dim.1) – 17.9% of variance
+
+Strong positive correlation with: Floors (0.61), Area (0.53), Bedrooms (0.41) and Price (0.39)
+
+High contributions: Floors (34.2%), Area (26.4%), Bedrooms (15.8%) and Price (14.1%)
+
+This axis represents size and structure, emphasizing houses with more floors and greater area, which tend to be more expensive. It can be interpreted as a "physical scale and value" dimension.
+
+**Dimension 2** (Dim.2) – 17.4% of variance
+
+Strong positive correlation: Price (0.60) and Floors (0.42)
+
+Negative correlation: Bedrooms (-0.49) and Area (-0.43)
+
+High contributions: Price (34.6%), Bedrooms (23.4%) and Area (17.5%)
+
+This dimension contrasts price with number of bedrooms and area, suggesting that higher prices may sometimes be associated with smaller but more valuable homes (e.g., due to location or quality). It may reflect a "market positioning" component.
+
+**Dimension 3** (Dim.3) – 16.9% of variance
+
+Very strong correlation: Bathrooms (0.85)
+
+High contribution: Bathrooms (71.7%)
+
+This dimension is clearly dominated by Bathrooms, highlighting a specific comfort/utility feature. It can be interpreted as a "comfort level" or "hygiene facility" axis.
+
+**Dimension 4** (Dim.4) – 16.6% of variance
+
+Very strong correlation: YearBuilt (0.93)
+
+High contribution: YearBuilt (87.4%)
+
+This axis captures construction period, clearly separating older from newer houses. It's a "building age" dimension.
+
+**Dimension 5** (Dim.5) – 15.8% of variance
+
+Strong contributions:Area (44.8%), Bedrooms (32.8%) and Floors (12.1%)
+
+This residual component still relates to size and occupancy, especially Area and Bedrooms, but in a different configuration not captured by earlier components. It may reflect layout complexity or nonlinear combinations of size and usage.
+
+We will now make two biplots of the variables and the principal components. The first one with PC1 and PC2 and the second one with PC3 and PC4 as the axes. This plots show how the original variables project onto the principal components.
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_var(res_pca, axes = c(1, 2))
+p2 <- fviz_pca_var(res_pca, axes = c(3, 4))
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+The two PCA biplots provide complementary insights into the structure of the housing data. The first biplot (PC1 vs PC2) highlights a contrast between physical characteristics like Area and Bedrooms versus Price, revealing that larger homes don't always correlate with higher prices—possibly due to factors like location or condition—suggesting a "size vs market value" trade-off. PC1 captures general physical scale and value, while PC2 reflects market positioning, with Price and Floors positively aligned and Area and Bedrooms pulling in the opposite direction. The second biplot (PC3 vs PC4) isolates more specific, orthogonal dimensions: PC3 is dominated by Bathrooms, representing a "comfort or utility" axis, while PC4 is driven almost entirely by YearBuilt, capturing a clear "building age" effect. Together, these biplots show that while size and price drive overall housing variation, unique features like bathroom count and construction year add meaningful nuance beyond the main structural and market traits.
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_ind(res_pca, habillage = "Location", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p2 <- fviz_pca_ind(res_pca, habillage = "Location", axes = c(3, 4), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+We observe a uniform distribution of points across the principal component planes, with no visible clustering, separation, or directional patterns associated with any specific location. This visual outcome suggests that the first four principal components, which together explain a significant portion of the variance (68%), do not capture location-based differences among the houses. In other words, the main variations in the dataset are not structured by location. This could imply that the physical and structural characteristics of the houses (like area, number of rooms, bathrooms, year built, or price) are relatively similar across the different locations in the data. Alternatively, it might indicate that the location variable, as currently defined, does not capture more nuanced geographic differences that could influence these housing features. Overall, the plot suggests that location does not play a dominant role in the variability captured by the main principal components.
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_ind(res_pca, habillage = "Condition", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p2 <- fviz_pca_ind(res_pca, habillage = "Condition", axes = c(3, 4), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p3 <- fviz_pca_ind(res_pca, habillage = "Garage", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p4 <- fviz_pca_ind(res_pca, habillage = "Garage", axes = c(3, 4), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+grid.arrange(p1, p2,p3, p4, ncol = 2)
+
+```
+
+When repeating the PCA visualization using Condition and Garage as grouping variables, we observe a similar pattern to that of Location: the data points remain evenly spread, without visible clusters or separations across the first four principal components. This indicates that Condition and Garage presence do not strongly influence the main axes of variation in the dataset. However, this does not necessarily mean these variables are irrelevant.
+
+Based on our previous analysis, we observed that Price strongly influenced the first principal components, potentially masking structural patterns among the other housing features. Since Price is better understood as an outcome variable rather than an input, we will now re-run the PCA excluding Price from the quantitative variables. Instead, we will convert Price into a categorical variable by dividing it into five price-level groups. This allows us to explore how different price categories relate to the structural features of the houses without biasing the principal components.
+
+By transforming Price into a categorical variable (e.g., quintiles) and excluding it from the PCA itself, we achieve two goals:
+
+1.  We allow the PCA to focus purely on structural and design-related variation (Area, Bedrooms, Bathrooms, Floors, YearBuilt) without being dominated by Price.
+
+2.  We can later project the Price categories onto the PCA space to visually explore how pricing levels relate to patterns in housing features — without forcing that relationship through the PCA axes.
+
+```{r, warning = FALSE}
+# Scale quantitative variables (excluding Price)
+quant_scaled <- scale(data[, c("Area", "Bedrooms", "Bathrooms", "Floors", 
+                               "YearBuilt")])
+
+# Create dataset for PCA with the price category # as supplementary qualitative variable
+data_pca <- data.frame(quant_scaled, 
+                       Price = data$Price_cat,
+                       Location = data$Location,
+                       Condition = data$Condition,
+                       Garage = data$Garage)
+
+# Perform PCA, treating price category as supplementary
+res_pca2 <- PCA(data_pca, quali.sup = 6:9 , graph = FALSE)
+
+#Explained variance
+res_pca2$eig
+# Plot of variance explained
+fviz_eig(res_pca2, addlabels = TRUE, ylim = c(0, 60))
+```
+
+No single axis dominates the variability. The first three dimensions explain over 61% of the total variance.
+
+```{r, warning = FALSE}
+#variable contributions
+res_pca2$var$contrib
+res_pca2$var$cor
+```
+
+Below is a detailed interpretation of how the variables contribute and relate to the main dimensions.
+
+**Dimension 1** (Dim.1) – 21.32% of variance
+
+Strong positive correlation with: Area (0.65), Bedrooms (0.54) and Floors (0.42)
+
+High contributions: Area (39.91%), Bedrooms (27.27%) and Floors (16.8%)
+
+This dimension reflects the overall size and occupancy capacity of the house. Larger houses with more bedrooms and floors score higher on this axis. It can be seen as a "size and structure" component.
+
+**Dimension 2** (Dim.2) – 20.48% of variance
+
+Strong positive correlation: Bathrooms (0.70) and Floors (0.47)
+
+Negative correlation: Bedrooms (-0.51)
+
+High contributions: Bathrooms (47.37%) and Bedrooms (25.33%)
+
+This dimension contrasts the number of bathrooms and floors against the number of bedrooms, possibly separating modern, compact houses (more bathrooms, fewer bedrooms) from larger traditional houses. It may represent a "modernity vs traditional layout" axis.
+
+**Dimension 3** (Dim.3) – 19.88% of variance
+
+Very strong correlation: YearBuilt (0.93)
+
+High contribution: YearBuilt (87.51%)
+
+This is a clear "construction year" component, distinguishing older homes from newer ones. Very little influence from other variables.
+
+**Dimension 4** (Dim.4) – 19.49%
+
+Strong correlation: Floors (0.76) and Bathrooms (-0.49)
+
+High contribution: Floors (59.33%) and Bathrooms (24.97%)
+
+This axis seems to capture vertical structure, differentiating homes by number of floors and their relationship with bathroom availability. Could relate to architectural configuration.
+
+By removing Price, we reveal more nuanced relationships between these structural features, which may help us later relate them back to the newly created price categories.
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_var(res_pca2, axes = c(1, 2))
+p2 <- fviz_pca_var(res_pca2, axes = c(3, 4))
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_ind(res_pca2, habillage = "Price", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p2 <- fviz_pca_ind(res_pca2, habillage = "Price", axes = c(3, 4), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+```{r, warning = FALSE,echo = FALSE}
+p1 <- fviz_pca_ind(res_pca2, axes = c(1,2), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat== "Very Low")),
+                   geom.ind = "point", col.ind = "steelblue") +
+      ggtitle("Very Low")
+
+p2 <- fviz_pca_ind(res_pca2, axes = c(1,2), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Low")),
+                   geom.ind = "point", col.ind = "orange") +
+      ggtitle("Low")
+
+p3 <- fviz_pca_ind(res_pca2, axes = c(1,2), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Medium")),
+                   geom.ind = "point", col.ind = "darkgreen") +
+      ggtitle("Medium")
+p4 <- fviz_pca_ind(res_pca2, axes = c(1,2), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "High")),
+                   geom.ind = "point", col.ind = "brown") +
+      ggtitle("High")
+p5 <- fviz_pca_ind(res_pca2, axes = c(1,2), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Very High")),
+                   geom.ind = "point", col.ind = "purple") +
+      ggtitle("Very High")
+p21 <- fviz_pca_ind(res_pca2, axes = c(3,4), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat== "Very Low")),
+                   geom.ind = "point", col.ind = "steelblue")
+p22 <- fviz_pca_ind(res_pca2, axes = c(3,4), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Low")),
+                   geom.ind = "point", col.ind = "orange")
+
+p23 <- fviz_pca_ind(res_pca2, axes = c(3,4), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Medium")),
+                   geom.ind = "point", col.ind = "darkgreen") 
+p24 <- fviz_pca_ind(res_pca2, axes = c(3,4), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "High")),
+                   geom.ind = "point", col.ind = "brown")
+p25 <- fviz_pca_ind(res_pca2, axes = c(3,4), label = "none", pointsize = 1, alpha.ind = 0.6,
+                   select.ind = list(name = which(data$Price_cat == "Very High")),
+                   geom.ind = "point", col.ind = "purple") 
+
+
+grid.arrange(p1, p2, p3,p4,p5,p21, p22, p23,p24,p25, ncol = 5,nrow=2)
+
+```
+
+We can see that the points have a similar (uniform) spread on the two dimensional plots among all five price groups. This allows us to say that the overall variance captured by the principal components is not particularly influenced by house price, indicating that PCA was not effective in separating the groups based on pricing.
+
+We will now perform a PCA without the variables Floors, Bedrooms and Bathrooms, these three variables can be considered as categorical ones because they have values that go from 1 to 5 in Bedrooms, 1 to 4 in Bathrooms and 1 to 3 in Floors. Moreover, they are not interesting in the PCA because having such a narrow range of values leads to a very small variance on this variables. 
+
+```{r}
+# Convert categorical variables to factors
+data_pca$Floors <- as.factor(data$Floors)
+data_pca$Bedrooms <- as.factor(data$Bedrooms)
+data_pca$Bathrooms <- as.factor(data$Bathrooms)
+# Select and scale the quantitative variables
+quant_scaled <- scale(data[, c("Area", "YearBuilt", "Price")])
+
+# Combine scaled quantitative data with categorical variables
+data_pca <- data.frame(quant_scaled,
+                       Location = data$Location,
+                       Condition = data$Condition,
+                       Garage = data$Garage,
+                       Floors = data_pca$Floors,
+                       Bedrooms= data_pca$Bedrooms,
+                       Bathrooms = data_pca$Bathrooms)
+
+# Perform PCA
+res_pca <- PCA(data_pca, quali.sup = 4:9, graph = FALSE)
+#Explained variance
+res_pca$eig
+# Plot of variance explained
+fviz_eig(res_pca, addlabels = TRUE, ylim = c(0, 60))
+
+```
+
+There are different methods that can be used to select the number of components, in our case, we will select 2 dimensions because all together explain 67% of the total variance, and also applying the Kaiser rule, which selects the components that have an eigenvalue greater than 1. 
+
+```{r, warning = FALSE}
+#variable contributions
+res_pca$var$contrib
+res_pca$var$cor
+```
+
+```{r, warning = FALSE}
+fviz_pca_var(res_pca, axes = c(1, 2))
+```
+
+**Dim.1** — Contrast between YearBuilt and Area
+
+Strong positive correlation from YearBuilt (+0.724)
+
+Strong negative correlation from Area (–0.668)
+
+High contributions from both (Area = 44.14%, YearBuilt = 51.72%)
+
+Dim.1 represents a trade-off between house size and house age. High values on Dim.1 indicate newer but smaller houses and low values on Dim.1 indicate older but larger houses
+
+**Dim.2** — Price-driven dimension
+
+Price dominates Dim.2: correlation = +0.923, contribution = 85%. Therefore, primarily represents price variation, almost independently of Area and YearBuilt.
+
+```{r, warning = FALSE}
+p1 <- fviz_pca_ind(res_pca, habillage = "Location", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p2 <- fviz_pca_ind(res_pca, habillage = "Condition", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p3 <- fviz_pca_ind(res_pca, habillage = "Garage", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p4 <- fviz_pca_ind(res_pca, habillage = "Floors", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p5 <- fviz_pca_ind(res_pca, habillage = "Bedrooms", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+p6 <- fviz_pca_ind(res_pca, habillage = "Bathrooms", axes = c(1, 2), 
+                   label = "none", pointsize = 1, alpha.ind = 0.6)
+grid.arrange(p1, p2,p3,p4,p5,p6, ncol = 3, nrow = 2)
+
+```
+We projected the dataset onto the first two principal components and visualized the individuals colored by various categorical features. The PCA plots reveal that no clear clustering structure is visible for any of the categorical variables — Location, Condition, Garage, Floors, Bedrooms, or Bathrooms. The points are evenly spread and heavily overlapped, regardless of the grouping variable. This suggests that the first two principal components do not capture any strong separation based on these variables.
+
+This aligns with earlier statistical findings (correlation, chi-squared, ANOVA), supporting the idea that the variables are largely independent of each other and lack strong, interpretable relationships with the target variable Price. As a result, dimensionality reduction via PCA does not enhance group separation nor reveal latent clusters among these categorical features.
+
+## Correspondence Analysis (CA)
+
+In this chapter, we apply Correspondence Analysis (CA) as an exploratory technique to examine the relationships between categorical variables in our housing dataset. CA allows us to visually represent associations between categories in a low-dimensional space, making patterns more interpretable and accessible for analysis.
+
+The primary goal of Correspondence Analysis is to approximate the structure of a contingency table, which is formed by crossing two categorical variables. This approach is particularly useful in understanding how two categorical dimensions interact, especially in contexts where traditional parametric methods are not suitable.
+
+In our case, the CA will help us explore how different house characteristics—such as location, condition, and number of floors—are associated with price ranges or other categorical groupings derived from the dataset. This visual and statistical exploration supports our broader goal of understanding the key factors influencing house prices, and complements other methods like PCA.
+
+Furthermore, CA is closely related to the χ² test of independence, often used to assess whether two categorical variables are statistically dependent. When such dependency exists, Correspondence Analysis goes a step further to uncover how they are associated, enabling us to interpret the nature and strength of these relationships graphically.
+
+To begin our Correspondence Analysis (CA), we will first focus on a pair of categorical variables, specifically Location and Condition. By constructing and analyzing the contingency table between these two variables, we aim to obtain an initial graphical and statistical understanding of how the condition of a house is associated with its location. This initial bivariate CA will help us identify broad trends and associations in a simpler two-dimensional context.
+
+Following this, we will extend the analysis by applying a Multiple Correspondence Analysis (MCA). MCA allows us to simultaneously consider a larger set of categorical variables, including Number of Floors, Number of Bathrooms, and Number of Bedrooms, in addition to Location and Condition. This multivariate approach will provide a more comprehensive view of how all these features jointly structure the housing dataset, capturing more complex patterns and interactions that cannot be detected by analyzing variable pairs independently.
+
+We begin by constructing the **contingency table**, which is a cross-tabulation of the two categorical variables: Location and Condition.
+
+```{r, warning=FALSE}
+# Create contingency table: Location vs Condition
+contingency_table <- table(data$Location, data$Condition)
+
+# Dimension
+I <- nrow(contingency_table)
+J <- ncol(contingency_table)
+
+# View the table
+print(contingency_table)
+```
+
+Then, we build the **Correspondance matrix** (or Probability Matrix). This matrix is obtained by dividing each element of the contingency table by the grand total. It represents the **joint probability distribution** of the variables.
+
+```{r, warning = FALSE}
+# Correspondence matrix (probabilities)
+total <- sum(contingency_table)
+P <- contingency_table / total
+print(round(P, 4))  # Show probabilities rounded to 4 decimals
+
+```
+
+Next, we use them to run CA:
+
+```{r, warning = FALSE}
+# Perform Correspondence Analysis
+ca_result <- CA(contingency_table, graph = FALSE)
+
+# Summary
+summary(ca_result)
+```
+
+Let's visualize the previous results:
+
+```{r, warning = FALSE}
+# Visualize results
+fviz_ca_biplot(ca_result, repel = TRUE)
+```
+
+Below is a detailed interpretation.
+
+-   **Downtown** is associated with **Excellent** condition
+
+    -   They are both far to the right along **Dim1**.
+
+    -   Their closeness suggests houses in Downtown areas are **most likely to be in Excellent condition**.
+
+-   **Urban** areas are associated with **Poor** condition
+
+    -   These two points are both in the **upper-left quadrant**, suggesting that **Urban** houses tend to be **in worse condition**.
+
+-   **Rural** areas are linked with **Fair** condition
+
+    -   These are both in the **lower-left quadrant**, showing a **moderate quality** in rural zones.
+
+-   **Suburban** appears **close to the center**
+
+    -   That suggests **Suburban** houses do **not show a strong preference** for any particular condition category — they are relatively **neutral**.
+
+-   **Good** condition appears to lean towards **Urban/Suburban**, but it’s somewhat isolated
+
+    -   It might be shared among various locations but not strongly associated with one in particular.
+
+To conclude the Correspondence Analysis (CA), we now turn our attention to the analysis of **inertia** and **category profiles**, two crucial components for interpreting the structure and strength of the association between the categorical variables.
+
+We begin by studying the **inertia**, which quantifies how far the observed contingency table is from the independence model. In practice, this is calculated by performing a **Chi-squared test of independence** between the variables. A significant Chi-squared statistic suggests that there is a dependency between the two variables, and CA allows us to explore and visualize the nature of this relationship.
+
+```{r, warning = FALSE}
+# Chi-squared test and total inertia
+chisq_result <- chisq.test(contingency_table)
+print(chisq_result)
+
+# Total inertia
+total_inertia <- chisq_result$statistic / sum(contingency_table)
+cat("Total inertia:", round(total_inertia, 4), "\n")
+```
+
+A high and statistically significant Chi-squared value confirms that the variables `Location` and `Condition` are not independent. The resulting inertia gives us an indication of how much structure or dependency exists in the data. In our case, the first dimension explains the majority of the inertia (73.8%), indicating a dominant underlying association pattern between the categories.
+
+Next, we analyze the **row and column profiles**, which provide conditional distributions:
+
+-   **Row profiles** represent how each row category (in our case, `Location`) distributes across the column categories (`Condition`).
+
+-   **Column profiles** do the opposite, showing how each condition is distributed across locations.
+
+These can be calculated as follows:
+
+```{r, warning = FALSE}
+# Row profiles: proportion of each condition within each location
+row_profiles <- sweep(contingency_table, 1, rowSums(contingency_table), 
+                      FUN = "/")
+print(round(row_profiles, 3))
+
+# Column profiles: proportion of each location within each condition
+col_profiles <- sweep(contingency_table, 2, colSums(contingency_table), 
+                      FUN = "/")
+print(round(col_profiles, 3))
+```
+
+```{r, warning = FALSE}
+# Row profiles 
+row_profiles_df <- melt(row_profiles)
+
+# Calculate average profile
+profile_mean <- colSums(contingency_table) / sum(contingency_table)
+mean_df <- data.frame(Var1 = "Average profile",
+                      Var2 = names(profile_mean),
+                      value = profile_mean)
+
+combined_profiles <- rbind(row_profiles_df, mean_df)
+p1 <- ggplot(combined_profiles, aes(x = Var1, y = value, fill = Var2)) +
+  geom_bar(stat = "identity", position = "fill") +  
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Row profiles",
+       x = "Location",
+       y = "Proportion",
+       fill = "Condition") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Column profiles
+col_profiles_df <- melt(col_profiles)
+
+# Calculate average profile
+profile_mean_col <- rowSums(contingency_table) / sum(contingency_table)
+mean_col_df <- data.frame(Var2 = "Average profile",
+                          Var1 = names(profile_mean_col),
+                          value = profile_mean_col)
+combined_col_profiles <- rbind(col_profiles_df, mean_col_df)
+p2 <- ggplot(combined_col_profiles, aes(x = Var2, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Column profile",
+       x = "Condition",
+       y = "Proportion",
+       fill = "Location") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+grid.arrange(p1, p2,ncol = 2)
+```
+
+The results suggest that Downtown exhibits a notably favorable profile, with a higher proportion of Excellent and Good ratings—both within its own distribution and in its overall contribution to those categories. In contrast, the Rural and Urban locations display less favorable profiles, being more associated with Fair and Poor conditions. This trend is consistent across both row and column profiles, reinforcing the interpretation.
+
+Suburban stands out for having a very balanced profile: no particular condition dominates, nor does it contribute disproportionately to any condition category. This suggests a relatively neutral or evenly distributed performance across all ratings.
+
+Overall, these profiles reveal a clear structural pattern in the data: Downtown tends to be associated with more favorable conditions, while Urban and Rural lean toward less favorable ones. This pattern is effectively captured through Correspondence Analysis (CA), which allows for a visual and analytical interpretation of the associations between the categories of both variables.
+
+To make the analysis more comprehensive, we will cross additional pairs of categorical variables to study their relationships through correspondence analysis.
+
+As a next step, we will explore the potential association between the categorical variable for **price** and the property's **location**.
+
+We begin by constructing the **contingency table** and the **correspondance matrix** of the two categorical variables: Location and Price_cat.
+
+```{r, warning=FALSE}
+# Select categorical variables
+data_ca <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                     "Bedrooms", "Garage", "Price_cat")]
+# Create contingency table: Location vs Price_cat
+contingency_table <- table(data_ca$Location, data_ca$Price_cat)
+
+# Dimension
+I <- nrow(contingency_table)
+J <- ncol(contingency_table)
+
+# View the table
+print(contingency_table)
+```
+
+```{r, warning = FALSE}
+# Correspondence matrix (probabilities)
+total <- sum(contingency_table)
+P <- contingency_table / total
+print(round(P, 4))  # Show probabilities rounded to 4 decimals
+
+```
+
+Next, we use them to run CA:
+
+```{r, warning = FALSE}
+# Perform Correspondence Analysis
+ca_result <- CA(contingency_table, graph = FALSE)
+
+# Summary
+summary(ca_result)
+```
+
+Once we have the results, we proceed as before: we start by visualizing the output and interpreting the main patterns observed.
+
+```{r, warning = FALSE}
+# Visualize results
+fviz_ca_biplot(ca_result, repel = TRUE)
+```
+
+The two dimensions together explain a substantial portion of the variation in the data (Dim1: 82.2%, Dim2: 17.6%), suggesting a meaningful low-dimensional representation of the relationships.
+
+-   **Urban** and **Very Low price** categories are closely located in the top right quadrant, indicating a strong association. This suggests that properties in urban areas are more likely to fall into the Very Low price category.
+
+-   **Suburban** areas are associated with **High prices**, as both are located in the top left quadrant and are relatively distant from the origin, indicating a strong contribution to the differentiation along the first dimension.
+
+-   **Downtown** and **Rural** locations are clustered near the center but lean slightly toward the **Low price** category. However, this association is weaker due to their proximity to the origin, which implies a lower contribution to the inertia.
+
+-   **Medium** and **Very High prices** are located near each other in the upper central area, with no strong association to any specific location. This could suggest that these price categories are spread more evenly across different types of locations.
+
+Then, we move on to a more detailed analysis.
+
+As before, we conclude the Correspondence Analysis by examining the inertia and category profiles to assess the strength and structure of the association between variables. This includes a Chi-squared test to detect dependency and a visual interpretation of the results.
+
+```{r, warning = FALSE}
+# Chi-squared test and total inertia
+chisq_result <- chisq.test(contingency_table)
+print(chisq_result)
+
+# Total inertia
+total_inertia <- chisq_result$statistic / sum(contingency_table)
+cat("Total inertia:", round(total_inertia, 4), "\n")
+```
+
+This p-value is well above the 0.05 threshold, indicating that we fail to reject the null hypothesis of independence. Therefore, there is no statistically significant association between the two categorical variables.
+
+Additionally, the total inertia is 0.0081, which is very low. This suggests that the deviation from independence is minimal and that the association between the variables is extremely weak. In other words, the structure captured by the Correspondence Analysis is not particularly informative in this case.
+
+Next, we analyze the **row and column profiles**:
+
+```{r, warning = FALSE}
+# Row profiles: proportion of each condition within each location
+row_profiles <- sweep(contingency_table, 1, rowSums(contingency_table), 
+                      FUN = "/")
+print(round(row_profiles, 3))
+
+# Column profiles: proportion of each location within each price
+col_profiles <- sweep(contingency_table, 2, colSums(contingency_table), 
+                      FUN = "/")
+print(round(col_profiles, 3))
+```
+
+```{r, warning = FALSE}
+# Row profiles 
+row_profiles_df <- melt(row_profiles)
+
+# Calculate average profile
+profile_mean <- colSums(contingency_table) / sum(contingency_table)
+mean_df <- data.frame(Var1 = "Average profile",
+                      Var2 = names(profile_mean),
+                      value = profile_mean)
+
+combined_profiles <- rbind(row_profiles_df, mean_df)
+p1 <- ggplot(combined_profiles, aes(x = Var1, y = value, fill = Var2)) +
+  geom_bar(stat = "identity", position = "fill") +  
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Row profiles",
+       x = "Location",
+       y = "Proportion",
+       fill = "Price") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Column profiles
+col_profiles_df <- melt(col_profiles)
+
+# Calculate average profile
+profile_mean_col <- rowSums(contingency_table) / sum(contingency_table)
+mean_col_df <- data.frame(Var2 = "Average profile",
+                          Var1 = names(profile_mean_col),
+                          value = profile_mean_col)
+combined_col_profiles <- rbind(col_profiles_df, mean_col_df)
+p2 <- ggplot(combined_col_profiles, aes(x = Var2, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Column profile",
+       x = "Price",
+       y = "Proportion",
+       fill = "Location") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+grid.arrange(p1, p2,ncol = 2)
+```
+
+-   In the **row profiles**, we see that each location category (Downtown, Rural, Suburban and Urban) exhibits a very similar price mix, with only minor differences. In every location, the five price levels (Very Low, Low, Medium, High, Very High) are all present in roughly comparable proportions (each hovering around 15‑25 %).
+
+-   Similarly, the **column profiles** indicate that the mix of locations is also **remarkably even**. Every price level contains roughly a quarter Downtown, a quarter Rural, a quarter Suburban and a quarter Urban listings, with only minor departures
+
+Overall, the profiles reinforce the weak association observed in the Correspondence Analysis and Chi-squared test.
+
+Finally, we will explore the potential association between the categorical variable for **price** and the property's **condition**.
+
+We begin by constructing the **contingency table** and the **correspondance matrix** of the two categorical variables: Condition and Price_cat.
+
+```{r, warning=FALSE}
+# Select categorical variables
+data_ca <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                     "Bedrooms", "Garage", "Price_cat")]
+# Create contingency table: Condition vs Price_cat
+contingency_table <- table(data_ca$Condition, data_ca$Price_cat)
+
+# Dimension
+I <- nrow(contingency_table)
+J <- ncol(contingency_table)
+
+# View the table
+print(contingency_table)
+```
+
+```{r, warning = FALSE}
+# Correspondence matrix (probabilities)
+total <- sum(contingency_table)
+P <- contingency_table / total
+print(round(P, 4))  # Show probabilities rounded to 4 decimals
+
+```
+
+Next, we use them to run CA:
+
+```{r, warning = FALSE}
+# Perform Correspondence Analysis
+ca_result <- CA(contingency_table, graph = FALSE)
+
+# Summary
+summary(ca_result)
+```
+
+Once we have the results, we proceed as before: we start by visualizing the output and interpreting the main patterns observed.
+
+```{r, warning = FALSE}
+# Visualize results
+fviz_ca_biplot(ca_result, repel = TRUE)
+```
+
+The first two dimensions account for a significant portion of the total inertia (Dim1: 47.1%, Dim2: 38.1%), allowing us to meaningfully interpret the spatial configuration of the categories.
+
+-   **Excellent condition** is closely associated with the **Medium price** category, as they are positioned near each other in the bottom-left quadrant. This suggests that properties in excellent condition tend to be priced at a medium level.
+
+-   **High price** category lies in the top-left quadrant, relatively close to the **Good condition**, which implies a possible association between well-maintained properties and higher pricing.
+
+-   **Poor condition** is distinctly placed in the bottom-right quadrant, near the **Very High** and **Low price** categories. This may reflect heterogeneity in poorly maintained properties—some of which might still command high prices (perhaps due to location or other factors), while others remain low-priced.
+
+-   **Very Low price** category is located near the origin and slightly downward, which could suggest a weak or diffuse association, not clearly linked to any single condition category.
+
+-   **Fair condition** appears somewhat centrally but is closest to **Low**, which may suggest a moderate association with lower pricing.
+
+As before, we conclude the Correspondence Analysis by examining the inertia and category profiles to assess the strength and structure of the association between variables. This includes a Chi-squared test to detect dependency and a visual interpretation of the results.
+
+```{r, warning = FALSE}
+# Chi-squared test and total inertia
+chisq_result <- chisq.test(contingency_table)
+print(chisq_result)
+
+# Total inertia
+total_inertia <- chisq_result$statistic / sum(contingency_table)
+cat("Total inertia:", round(total_inertia, 4), "\n")
+```
+
+Since the p-value is slightly above the common significance threshold of 0.05, we do not have strong statistical evidence to reject the null hypothesis of independence between the two categorical variables. This suggests that any association observed may be weak or due to chance.
+
+The total inertia is 0.0102, which indicates a very low level of deviation from independence. In the context of Correspondence Analysis, this further confirms that the association between the variables is weak and that the structure revealed by the analysis may not be particularly strong or meaningful.
+
+Next, we analyze the **row and column profiles**:
+
+```{r, warning = FALSE}
+# Row profiles: proportion of each condition within each location
+row_profiles <- sweep(contingency_table, 1, rowSums(contingency_table), 
+                      FUN = "/")
+print(round(row_profiles, 3))
+
+# Column profiles: proportion of each location within each condition
+col_profiles <- sweep(contingency_table, 2, colSums(contingency_table), 
+                      FUN = "/")
+print(round(col_profiles, 3))
+```
+
+```{r, warning = FALSE}
+# Row profiles 
+row_profiles_df <- melt(row_profiles)
+
+# Calculate average profile
+profile_mean <- colSums(contingency_table) / sum(contingency_table)
+mean_df <- data.frame(Var1 = "Average profile",
+                      Var2 = names(profile_mean),
+                      value = profile_mean)
+
+combined_profiles <- rbind(row_profiles_df, mean_df)
+p1 <- ggplot(combined_profiles, aes(x = Var1, y = value, fill = Var2)) +
+  geom_bar(stat = "identity", position = "fill") +  
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Row profiles",
+       x = "Condition",
+       y = "Proportion",
+       fill = "Price") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Column profiles
+col_profiles_df <- melt(col_profiles)
+
+# Calculate average profile
+profile_mean_col <- rowSums(contingency_table) / sum(contingency_table)
+mean_col_df <- data.frame(Var2 = "Average profile",
+                          Var1 = names(profile_mean_col),
+                          value = profile_mean_col)
+combined_col_profiles <- rbind(col_profiles_df, mean_col_df)
+p2 <- ggplot(combined_col_profiles, aes(x = Var2, y = value, fill = Var1)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Column profile",
+       x = "Price",
+       y = "Proportion",
+       fill = "Condition") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+grid.arrange(p1, p2,ncol = 2)
+```
+
+-   In the **row profiles**, we see that all housing conditions (Excellent, Fair, Good, Poor) have a fairly similar distribution across price levels, with only minor differences. This suggests little variation in price distribution by condition.
+
+-   Similarly, the **column profiles** indicate that each price category contains a fairly even mix of property conditions.
+
+Overall, the profiles reinforce the weak association observed in the Correspondence Analysis and Chi-squared test.
+
+## Multiple correspondence analysis (MCA)
+
+We now move on to **Multiple Correspondence Analysis (MCA)**, which is a natural extension of the Correspondence Analysis performed earlier.
+
+While CA is limited to the analysis of two categorical variables, **MCA generalizes this approach to handle multiple categorical variables simultaneously**. It allows us to study the joint relationships among several categorical variables and to uncover underlying structures in the data.
+
+The goal of MCA is to **reduce the dimensionality of the data** while preserving as much of the variability (inertia) as possible. This facilitates interpretation by representing individuals (observations) and categories (levels of the variables) in a common low-dimensional space.
+
+In this section, we apply MCA to our housing dataset by including variables such as Location, Condition, Garage, Number of Floors, Number of Bathrooms,Number of Bedrooms and the categorization of price that we did on the PCA chapter. This will allow us to explore how these categories interact and how they contribute to the global structure of the dataset.
+
+Before performing MCA, we must ensure that the variables we include are categorical. We select the relevant variables and convert them to `factor` type.
+
+```{r, warning = FALSE}
+# Select categorical variables
+data_mca <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                     "Bedrooms", "Garage", "Price_cat")]
+
+# Convert to factors
+data_mca <- data.frame(lapply(data_mca, as.factor))
+
+```
+
+Now we perform the MCA using the `MCA()` function from the `FactoMineR` package.
+
+```{r, warning = FALSE}
+# Run MCA
+mca_result <- MCA(data_mca, graph = FALSE)
+
+# Summary
+summary(mca_result)
+```
+
+We visualize both individuals and variable categories in the factor space using a biplot. This helps us detect patterns, groupings, or outliers.
+
+```{r, warning = FALSE}
+# Biplot: individuals and categories
+fviz_mca_biplot(mca_result,
+                label = "var",
+                repel = TRUE,
+                ggtheme = theme_minimal(),
+                col.ind = "gray70",      # Color of individuals
+                title = "MCA Biplot: Individuals and Categories")
+
+```
+
+The gray dots represent individual observations (different houses) while the red labels and triangles represent the categories of the categorical variables, such as the number of bedrooms, bathrooms, floors, property condition, or location type.
+
+The two axes, Dim1 (5.8%) and Dim2 (5.6%), represent the first two principal dimensions of variation in the data. Together, they account for approximately 11.4% of the total variance.
+
+Categories that are located closer to the gray dots are more strongly associated with specific homes. For example, **Bedrooms_2**, **Floors_3**, and **Bathrooms_3** cluster together on the right side along with categories like **Poor**, **Very Low**, and **Rural**, suggesting a group of lower-condition homes, often in less urban areas.
+
+On the opposite side, features like **Excellent** condition, **Downtown** location, and **Medium** price are found together in the lower-left quadrant, indicating a different profile of properties, likely urban, better maintained, and in medium price ranges.
+
+The category **Yes** (indicating that the home has a garage) appears toward the upper-right quadrant near **Bedrooms_4** and **Fair** condition, suggesting that homes with a garage are more common among properties with 4 bedrooms and intermediate quality levels.
+
+Meanwhile, **Suburban** location and **High** price group together toward the top center, indicating another subset of suburban, higher-value homes.
+
+Overall, the first dimension (Dim1) seems to separate homes based on quality and location, from urban, higher-condition properties (left) to rural, lower-condition ones (right), while the second dimension (Dim2) captures variations related to suburban locations and garage availability.
+
+We examine now the amount of variance (inertia) explained by each dimension. We can already observe how the variance is distributed by looking at the summary of the results from applying MCA. However, it is much clearer when visualized graphically, as it’s much easier to spot an “elbow” in the plot and interpret the dimensional contribution visually. This helps decide how many dimensions are needed to capture the structure of the data.
+
+```{r, warning = FALSE}
+# Scree plot: percentage of inertia explained
+fviz_screeplot(mca_result,
+               addlabels = TRUE,
+               ylim = c(0, 40),
+               title = "Explained Inertia by Dimensions")
+
+```
+
+Each dimension contributes relatively evenly to the total explained variance, with the first dimension accounting for 5.8%, the second 5.6%, and the rest gradually decreasing down to 5% for the tenth dimension. The decline is very slight and linear, and importantly, there is no clear "elbow" or sudden drop in the curve—this suggests that no single dimension stands out as capturing a dominant portion of the variance.
+
+In practical terms, this indicates that the variance is fairly evenly distributed across dimensions, and it may be necessary to retain several dimensions to capture a meaningful amount of the structure in the data.
+
+We now examine the **contribution** of each variable category to the formation of the principal dimensions. High-contribution categories are the most influential in defining the axes.
+
+```{r, warning = FALSE}
+# Plot variable contributions
+fviz_mca_var(mca_result,
+             choice = "var",
+             repel = TRUE,
+             title = "Variable Categories - Contributions")
+# Print contribution table
+print(mca_result$var$contrib)
+
+```
+
+This plot illustrates the contribution of each categorical variable to the first two dimensions.
+
+In the MCA results, the variables that contribute most to Dim1 are Price, Bathrooms, and Floors. This suggests that the first dimension primarily reflects structural and economic aspects of the properties—such as size, amenities, and market value—capturing a spectrum from smaller, more modest homes to larger, more expensive ones.
+
+For Dim2, the dominant variables are Condition and Location, followed closely by Price and Garage availability. This indicates that the second dimension is more associated with the context and quality of the homes—how well they are maintained, where they are located, and whether they include certain amenities like a garage.
+
+Overall, Dim1 appears to distinguish homes based on their physical and financial characteristics, while Dim2 separates them by qualitative and contextual attributes. Price plays a relevant role in both dimensions, acting as a bridge between structure and condition.
+
+Finally, we evaluate the **cos² values** (squared cosine) to understand how well each category is represented in the factor map.
+
+```{r, warning = FALSE}
+# Plot cos² for variable categories
+fviz_mca_var(mca_result,
+             col.var = "cos2",                
+             gradient.cols = c("lightblue2", "orange1", "red2"),
+             repel = TRUE,
+             title = "Representation Quality (cos²) of Variable Categories")
+
+
+```
+
+The cos² value, shown through the color gradient from blue to red, indicates how well a category is represented in the two-dimensional MCA space. Higher cos² values (closer to red) suggest that the position of the category in the plot closely reflects its true contribution to the MCA, while lower values (closer to blue) indicate a poorer representation.
+
+We can see that the categories **"Excellent"**, **“High”** and **"Fair"** are represented exceptionally well, as indicated by their deep red color. This means that these categories contribute significantly to the overall structure captured by the first two dimensions.
+
+In contrast, categories like **“Good”**, **“Floors_1”**, **“Very Low”** and **“Poor”** appear in light blue, implying a weak representation in this two-dimensional space. These categories may contribute more to other dimensions not shown in this plot or may simply have a less pronounced influence in distinguishing the individuals.
+
+## Unsupervised Clustering
+
+Clustering is a powerful technique used to group similar data points based on their inherent characteristics, without relying on predefined labels. The goal of clustering is to partition the dataset into distinct groups or clusters, where data points within each cluster are more similar to each other than to those in other clusters. This technique is especially valuable in exploratory data analysis, as it helps reveal patterns, structures, and relationships in complex datasets. In the context of our housing dataset, clustering will allow us to uncover natural groupings of houses, which can then be analyzed for patterns in pricing, features, or geographic location. Clustering also aids in simplifying complex data, improving decision-making, and providing valuable insights for further analysis.
+
+### Unsupervised Clustering: Hierarchical
+
+Hierarchical clustering is a method that builds a hierarchy of clusters in a tree-like structure called a dendrogram. This technique can be either agglomerative (bottom-up) or divisive (top-down). In agglomerative hierarchical clustering, each data point starts in its own cluster, and pairs of clusters are successively merged based on their similarity. On the other hand, divisive clustering starts with one cluster containing all data points and splits it recursively into smaller clusters. The resulting dendrogram provides a visual representation of how clusters are related and can be cut at a desired level to define a fixed number of clusters.
+
+First of all, to perform unsupervised clustering we get rid of all the non-numeric variables and scale the dataset so that all the features are on the same scales. If we did not do this, the features would not contribute equally to the distance calculations used in the clustering processes.
+
+```{r, warning = FALSE}
+data_un <- data[,c('Area', 'Bedrooms', 'Bathrooms', 'Floors', 
+                   'YearBuilt', 'Price')]
+data_un <- scale(data_un)
+```
+
+Let's start with the Hierarchical Clustering method.
+
+```{r, warning = FALSE}
+dist_matrix <- dist(data_un)  
+hc <- hclust(dist_matrix, method = "ward.D2")  
+# Ward’s method minimizes variance within clusters
+plot(hc, labels = FALSE, main = "Hierarchical Clustering Dendrogram")
+```
+
+We cannot appreciate barely anything from the Dendogram plot since there are too many branches. However, since there is not a clear jump in merge height right before the last merge, we can state that there is no natural number of clusters and that we will have to arbitrarily decide how many we want to keep. 
+We want to select a number of clusters that is low enough that we can associate the clusters to some kind of interpretation but big enough so that the variability contained is sufficient. The ideal number that takes into account both of these objectives is 4 clusters. However, we notice that it is hard to draw a straight line that encompasses the four clusters, meaning that there is likely an alternative similar number of clusters that we can take without much difference in variability. Therefore, we finally decide to take three clusters.
+
+```{r}
+hc_clusters <- cutree(hc, k = 3)  
+data$HC_Cluster <- as.factor(hc_clusters)
+```
+
+Now we are going to look whether some of the categories overlap well with the cluster decided by the Hierarchical Clustering. For this purpose, we will use mosaic plots, an easy visual way to compare groups. In the x-axis of the plot represents the different levels of one of our categorical variables, while for every one of these categories there is a column divided by colors, indicating how many of the observations of that level belong to each one of the clusters. On top of that, the width of these columns shows the proportion of the observations belonging to each category of the variable. 
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Location, data$HC_Cluster),
+           main = "Mosaic Plot: Location vs HC Cluster",
+           xlab = "Location",
+           ylab = "HC Cluster",
+           color = TRUE,
+           las = 1)
+```
+
+As we can see, there is no relation between the clusters and location, since all house locations seem to have approximate proportions of observations in each cluster.
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Condition, data$HC_Cluster),
+           main = "Mosaic Plot: Condition vs HC Cluster",
+           xlab = "Condition",
+           ylab = "HC Cluster",
+           color = TRUE,
+           las = 1)
+```
+
+We can say the same about the condition of the house. There is no stand-out condition correlating to any of the clusters.
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Garage, data$HC_Cluster),
+           main = "Mosaic Plot: Garage vs HC Cluster",
+           xlab = "Garage",
+           ylab = "HC Cluster",
+           color = TRUE,
+           las = 1)
+```
+However, since we have not studied the width of the columns, even though from the eye it seems that they are quite similarly valued, we can transform the visualizations to simple bar plots.
+
+```{r}
+par(mfrow = c(2, 2))
+barplot(table(data$Location, data$HC_Cluster), main = "Mosaic Plot: Location vs HC Cluster",
+           xlab = "Location",
+           ylab = "HC Cluster")
+barplot(table(data$Condition, data$HC_Cluster), main = "Mosaic Plot: Condition vs HC Cluster",
+           xlab = "Condition",
+           ylab = "HC Cluster")
+barplot(table(data$Garage, data$HC_Cluster), main = "Mosaic Plot: Garage vs HC Cluster",
+           xlab = "Garage",
+           ylab = "HC Cluster")
+```
+
+Finally, nothing changes with the Garage binary variable. We cannot make any conclusion.
+
+Let's try now another method.
+
+### Unsupervised Clustering: K-Means
+
+K-means clustering is one of the most commonly used clustering algorithms. It is a centroid-based method, meaning that each cluster is represented by a central point (the centroid), and the algorithm assigns each data point to the cluster with the closest centroid. The algorithm works iteratively: it starts by randomly selecting k initial centroids, then assigns each data point to the nearest centroid, and recalculates the centroids based on the newly formed clusters. This process repeats until the centroids no longer change significantly. The primary advantage of K-means is its simplicity and efficiency, making it suitable for large datasets. In the housing dataset, K-means can help us segment houses into clusters based on features such as price, size, or location, enabling targeted analysis and decision-making.
+
+To decide the number of clusters that will be chosen, we use the Elbow rule: iterate the technique with a range of cluster numbers and calculate the variability explained, therefore choosing the number that combines a reasonable number of clusters and a good proportion of variability explained. This is basically equivalent to the performing of the Pseudo F-statistic as a method to choose the number of clusters, since we are calculating the ratio of the mean sum of squares between groups to the mean sum of squares within group. Higher values essentially represent better clustering results.
+
+```{r, warning = FALSE}
+VE <- c()
+for (k in 1:25){
+  km <- kmeans(data_un,centers=k,nstart=25)
+  VE[k] <- km$betweenss/km$totss
+}
+par(mfrow=c(1,1))
+plot(VE,type="b",pch=19,xlab="Number of clusters",ylab="Explained variability")
+```
+We see that from 1 to 25 clusters, the percentage of variability explained does not stabilize at a good number, as we can see that it is slowly ending at around 60%. This is not a good value in itself, and on top of that it is given by the abnormal number of 25 clusters, which would be near to impossible to interpret even if it gave a good result. 
+
+We finally decide to choose 4 clusters.
+
+```{r, warning = FALSE}
+set.seed(295)
+kmeans_result <- kmeans(data_un, centers = 4, nstart = 25)
+data$KMeans_Cluster <- as.factor(kmeans_result$cluster)
+```
+
+We repeat the same routine to check whether the categorical variables correspond to the cluster differentiations.
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Location, data$KMeans_Cluster),
+           main = "Mosaic Plot: Location vs KMeans Cluster",
+           xlab = "Location",
+           ylab = "KMeans Cluster",
+           color = TRUE,
+           las = 1)
+```
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Condition, data$KMeans_Cluster),
+           main = "Mosaic Plot: Condition vs KMeans Cluster",
+           xlab = "Condition",
+           ylab = "KMeans Cluster",
+           color = TRUE,
+           las = 1)
+```
+
+```{r, warning = FALSE}
+mosaicplot(table(data$Garage, data$KMeans_Cluster),
+           main = "Mosaic Plot: Garage vs KMeans Cluster",
+           xlab = "Garage",
+           ylab = "KMeans Cluster",
+           color = TRUE,
+           las = 1)
+```
+
+As we can see from the plots, there is no alignment between the clusters and any of the categorical variables.
+
+Therefore we may think that the numerical variables capture patterns that the categorical variables do not and the other way around. We tried changing the number of clusters in both of the methods in case we were trying to force an unnatural number and the results were as ambiguous as the ones shown on the report. This confirms that there is no issue with the number of clusters decided and concludes that the clusters discover new groupings not explained by Location, Condition or Garage availability.
+
+Interpreting these results with the meaning behind the data shows that they do make sense: even though features like a nice location, a well-mantained building and garage availability are sought after when buying a house, they are not related enough to our numerical variables, like area, number of rooms or price, to make any of the clusters align with them. In other words, the combination of features such as number of rooms, area, antiquity and price, does not create groupings that are related to Location, Garage availability or Condition, since these variables do not have much in common or are greatly correlated, as you would think by using common sense.
+
+We are gonna test now the validaty of these clusters, in order to study this clustering technique and its result in a statistcal way. For this purpose, we will use the TESS, Pseudo F-statistic and Silhouette techniques.
+
+TESS evaluates the within-group variability, representing proportion of total variance explained by the clustering.
+
+```{r}
+TSS <- sum(scale(data_un, scale = FALSE)^2)
+BSS <- kmeans_result$betweenss
+TESS <- BSS / TSS
+
+cat("TESS:", TESS, "\n")
+```
+
+As we can see from the result, the variance explained by the 4-cluster K-Means technique is very poor and undesirable.
+
+The Silhouette technique controls how well-defined the clusters are. Its result ranges from -1 to 1, with the higher values indicating better clustering results.
+
+```{r}
+library(cluster)
+sil <- silhouette(kmeans_result$cluster, dist(data_un))
+avg_sil <- mean(sil[, 3])
+cat("Average Silhouette Width:", avg_sil, "\n")
+```
+Our average silhouette width is 0.12, which is far away from 1. We can conclude that the clustering number we have chosen does not provide good clustering results, as the validation techniques fail greatly.
+
+## Supervised Clustering
+
+While clustering is generally an unsupervised learning technique, supervised clustering refers to techniques where prior knowledge (such as labels or categories) is used to guide the clustering process.
+
+### Supervised Clustering: K-NN Method
+
+We will use the variable of Price as the response variable. We also need to transform all variables to numeric.
+
+```{r, warning = FALSE}
+data_knn <- data[, setdiff(names(data)[2:11], "Price")]
+
+
+data_knn$Garage <- ifelse(data_knn$Garage=='Yes',1,0)
+
+data_knn$Condition <- as.character(data_knn$Condition)
+data_knn$Condition[data_knn$Condition == "Excellent"] <- 4
+data_knn$Condition[data_knn$Condition == "Good"] <- 3
+data_knn$Condition[data_knn$Condition == "Fair"] <- 2
+data_knn$Condition[data_knn$Condition == "Poor"] <- 1
+data_knn$Condition <- as.numeric(data_knn$Condition)
+
+data_knn$Location <- as.character(data_knn$Location)
+data_knn$Location[data_knn$Location == "Downtown"] <- 4
+data_knn$Location[data_knn$Location == "Urban"] <- 3
+data_knn$Location[data_knn$Location == "Suburban"] <- 2
+data_knn$Location[data_knn$Location == "Rural"] <- 1
+data_knn$Location <- as.numeric(data_knn$Location)
+
+summary(data_knn)
+```
+
+The interpretation of the transformations are the following: the Garage availability variable is simple since it is binary, we set 1 to those houses that have and 0 to those which do not; for the Condition variable, we create a discrete scale from 1 to 4 that indicates how well-mantained is the house, with 4 being the best and 1 the worst; for the Location variable we also create a discrete scale with the same steps, but in this case we decide to judge based on how close to the city/town center the house is.
+
+After this, we decide the proportion of observations that we want to have in the training sample and make the division between training and testing sets as follows:
+
+```{r, warning = FALSE}
+set.seed(5454)
+p <- 0.7                 
+n <- dim(data_knn)[1]
+train.sel <- sample(c(FALSE,TRUE),n,rep=TRUE,prob=c(1-p,p))
+train     <- data_knn[train.sel,]
+test      <- data_knn[!train.sel,]
+
+train_features <- train[, -ncol(train)]
+train_features <- scale(train_features)
+train_labels <- train$Price_cat
+
+test_features <- test[, -ncol(test)]
+test_features <- scale(test_features, center = attr(train_features, 
+                                                    "scaled:center"), 
+                     scale = attr(train_features, "scaled:scale"))
+test_labels <- test$Price_cat
+```
+
+We scaled our data because KNN is based on distances. We continue by choosing K.
+
+```{r, warning = FALSE}
+p <- c()
+K <- seq(1,21,2)
+for(k in K){
+  set.seed(5454)
+  knn <- knn(train_features, test_features, cl=train_labels, k = k)
+  t <- table(knn,test_labels)
+  p <- c(p,sum(diag(t))/sum(t))
+}
+plot(K,p,pch=19,type='b')
+K[which.max(p)] 
+```
+
+Now we are all set to apply the K-NN algorithm with k = 5.
+
+```{r, warning = FALSE}
+set.seed(5454)
+knn_pred <- knn(train = train_features, test = test_features, 
+                cl = train_labels, k = 5)
+```
+
+To evaluate the model, we will use a confusion matrix first.
+
+```{r, warning = FALSE}
+confusion_matrix <- table(Predicted = knn_pred, Actual = test_labels)
+```
+
+We will not print the confusion matrix since looking at it does not help us much. Instead, we will calculate the accuracy of the method by using the elements of the matrix.
+
+```{r, warning = FALSE}
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+
+We will now try Kernel KNN.
+
+```{r, warning=FALSE}
+p <- c()
+K <- seq(1,21,2)
+for(k in K){
+  set.seed(5454)
+  kknn <- kknn(Price_cat~., train, test,k=k)
+  t <- table(fitted(kknn),test$Price_cat)
+  p <- c(p,sum(diag(t))/sum(t))
+}
+plot(K,p,pch=19,type='b')
+K[which.max(p)] 
+```
+
+We will do KNN with k=11.
+
+```{r, warning=FALSE}
+set.seed(5454)
+kknn11 <- kknn(Price_cat ~., train, test,k=11)
+fit   <- fitted(kknn11)
+t     <- table(fit,test$Price_cat)
+sum(diag(t))/sum(t)
+```
+
+We do not have any improvement using Kernel. Let's try doing PCA to reduce dimensionality and irrelevant variables.
+
+```{r, warning = FALSE}
+res.acp0 <- princomp(data_knn[,-ncol(data_knn)])
+screeplot(res.acp0,type='lines')
+res.acp  <- res.acp0$scores[,1]
+train2   <- data.frame(c1=res.acp[ train.sel])
+test2    <- data.frame(c1=res.acp[!train.sel])
+K <- seq(1,21,2)
+p <- c()
+for(k in K){
+  set.seed(5454)
+  knn <- knn(train2, test2, cl=train$Price_cat, k = k)
+  t <- table(knn,test$Price_cat)
+  p <- c(p,sum(diag(t))/sum(t))
+}
+plot(K,p,pch=19,type='b')
+K[which.max(p)]
+```
+
+We see from the screeplot that the first principal component explains a lot of the variance from the dataset, that's why we just selected the first dimension from the PCA to perform the KNN.
+
+```{r, warning = FALSE}
+set.seed(5454)
+knn <- knn(train2, test2, cl=train$Price_cat, k = 9)
+t <- table(knn,test$Price_cat)
+t
+sum(diag(t))/sum(t)
+```
+
+Now, the accuracy is 0,212, which continues to be a pretty low accuracy, so we will try another method to do the supervised clustering to see if there are any improvements.
+
+### Supervised Clustering: Naive Bayes
+
+Supervised clustering using the Naive Bayes method is a supervised classification approach where data points are assigned to a predefined number of classes. This technique operates under the fundamental assumption that the features influencing the presence or absence of a given class are mutually independent. In application, the probability of a data point belonging to a certain class is modeled as the product of the prior probability of the class and the probability of observing the given features under that class. It is based on the Bayes theorem:
+
+$$
+P(Class | Characteristics) = \frac{P(Characteristics|Class) \cdot P(Class)}{P(Characteristics)}
+$$
+
+The independence assumption implies that each feature independently contributes to the classification outcome, suggesting low correlation among features. This method offers several advantages: it is simple to implement, highly computationally efficient (with a linear cost relative to the number of predictors), exhibits strong predictive performance in deterministic classification tasks, and is easily scalable when incorporating new features. Furthermore, it requires a smaller training set compared to many alternative algorithms.
+
+However, Naive Bayes also has limitations. The independence assumption may not hold in real-world datasets, potentially undermining predictive performance, particularly in probabilistic classifications. In small samples, it is possible for the estimated probability of a class given a feature to be zero if that feature is absent, though this can be corrected by smoothing techniques. Additionally, the method's performance is sensitive to prior probabilities, making it susceptible to biases from non-random sampling.
+
+Before performing supervised clustering, we must ensure that the variables we include are categorical. We select the relevant variables and convert them to `factor` type.
+
+```{r, warning = FALSE}
+# Select categorical variables
+data_bayes <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                       "Bedrooms", "Garage", "Price_cat")]
+
+# Convert to factors
+data_bayes <- data.frame(lapply(data_bayes, as.factor))
+```
+
+So, we apply the Naive Bayes algorithm to the dataset (`data_bayes`) to predict the price category (`Price_cat`) of properties based on several categorical features: `Location`, `Condition`, `Floors`, `Bathrooms`, `Bedrooms`, and `Garage`.
+
+```{r, warning = FALSE}
+# Split the dataset into training (70%) and test (30%) sets
+set.seed(123) 
+train_index <- createDataPartition(data_bayes$Price_cat, p = 0.7, 
+                                   list = FALSE)
+train_data <- data_bayes[train_index, ]
+test_data  <- data_bayes[-train_index, ]
+
+# Train the Naive Bayes model
+model_nb <- naiveBayes(Price_cat ~ ., data = train_data)
+```
+
+The algorithm of Naive Bayes requires that each conditional probability for categorical predictors be non zero, since otherwise the predicted posterior probability will be zero.
+
+```{r, warning = FALSE}
+# Check if any of the probabilities are exactly 0
+zero_probs <- sapply(model_nb$tables, function(x) any(x == 0))
+print(zero_probs)
+
+if(any(zero_probs)){
+  cat("Warning: There are zero conditional probabilities!\n")
+} else {
+  cat("All conditional probabilities are non-zero. \n")
+}
+```
+
+After checking the conditional probability tables of the Naive Bayes model, we found that **none of the probabilities are zero**, as all results of the test were `FALSE`. This means that for every combination of predictor category and target class, there was at least one instance observed in the training data.
+
+Since there are no zero probabilities, **Laplace correction (smoothing) is not necessary** in this case.\
+Applying Laplace correction is typically used to avoid zero probabilities by artificially adjusting the probability estimates, but here it would have no impact on model performance because the required condition is already satisfied.
+
+```{r, warning = FALSE}
+# Predict the Price_cat on the test set
+predictions <- predict(model_nb, test_data)
+
+# Evaluate model performance using a confusion matrix
+conf_mat <- confusionMatrix(predictions, test_data$Price_cat)
+print(conf_mat)
+```
+
+The Naive Bayes model achieved an overall accuracy of **20.67%**, which is slightly above the **No Information Rate (NIR)** of 20%, indicating that the model performs only marginally better than random guessing. The **p-value** for the accuracy compared to the NIR is **0.357**, suggesting that this improvement is not statistically significant.
+
+The **Kappa statistic** is **0.0083**, which is very close to zero, implying almost no agreement between the predicted and actual classifications beyond chance.
+
+Analyzing performance by class:
+
+-   **Sensitivity** (true positive rate) is low across all categories, ranging from **14% to 32%**, indicating that the model struggles to correctly identify instances of each price category.
+
+-   **Specificity** (true negative rate) is higher, between **73% and 85%**, meaning the model is better at identifying when an instance does *not* belong to a certain class.
+
+-   **Positive Predictive Value** (precision) is also quite low, indicating a high number of false positives.
+
+Finally, the **Balanced Accuracy** — an average of sensitivity and specificity — is around **50%** for all classes, reinforcing that the model is not performing significantly better than random classification.
+
+Overall, these results suggest that the Naive Bayes model may not be the most suitable choice for this dataset, likely due to the violation of the independence assumption between features.
+
+### Supervised Clustering: Random Forest
+
+Random Forest is a powerful ensemble learning method that consists of generating a large number of decision trees, each built from a random variation of the original training set.\
+The goal is to create trees that are as **uncorrelated** as possible, which is achieved through two main mechanisms:
+
+-   **Bootstrapping** the observations to create different training subsets.
+
+-   **Randomly selecting a subset of variables** to consider for each split within a tree.
+
+For predictions, Random Forest aggregates the results from all individual trees, either by averaging the probabilities (in categorical outcomes) or the means (in continuous outcomes) across the trees.
+
+This method offers several advantages: it can effectively handle both continuous and categorical variables as predictors and responses, making it versatile for various types of data. Additionally, Random Forest performs automatic variable selection and can capture complex interactions between variables, improving model accuracy. It is also robust to missing data, allowing for reliable predictions even with incomplete information. Random Forest is known for providing excellent predictive performance, exhibiting low bias and low variance, thanks to the resampling process (bootstrap aggregation) used in building the trees. Another key benefit is its ability to calculate variable importance and prediction error on the fly, without requiring a separate validation set, making it very efficient for model evaluation.
+
+However, Random Forest also presents some drawbacks. It can be computationally intensive, particularly when dealing with large datasets and a high number of trees, leading to longer training times. Moreover, while the model excels in predictive power, it tends to be harder to interpret compared to simpler models like individual decision trees. This lack of interpretability can make it challenging to understand the relationships between variables or to extract actionable insights from the model.
+
+Before performing supervised clustering, we must ensure that the variables we include are categorical. We select the relevant variables and convert them to `factor` type.
+
+```{r, warning = FALSE}
+# Select categorical variables
+data_forest <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                        "Bedrooms", "Garage", "Price_cat")]
+
+# Convert to factors
+data_forest <- data.frame(lapply(data_forest, as.factor))
+```
+
+So, we apply the Random Forest algorithm to the dataset (`data_forest`) to predict the price category (`Price_cat`) of properties based on several categorical features: `Location`, `Condition`, `Floors`, `Bathrooms`, `Bedrooms`, and `Garage`.
+
+```{r, warning = FALSE}
+# Train the Random Forest model
+set.seed(123)  # Set seed for reproducibility
+model_rf <- randomForest(
+  Price_cat ~ Location + Condition + Floors + Bathrooms + Bedrooms + Garage,
+  data = data_forest,
+  ntree = 500,      # Number of trees
+  mtry = 3,         # Number of variables randomly sampled at each split
+  importance = TRUE # Calculate variable importance
+)
+
+# Print model summary
+print(model_rf)
+```
+
+The Random Forest model is trained using 500 trees and selects 3 variables at each split. The Out-Of-Bag (OOB) estimate of error rate is **78.55%**, indicating a relatively high prediction error.\
+The OOB error is an internal estimate of the generalization error based on the training data itself. It is important to note that the prediction error depends on the **correlation between the trees** (lower correlation leads to better performance) and the **individual predictive capacity of each tree** (higher capacity improves accuracy). In this case, the relatively high OOB error suggests that the model struggles to accurately classify the categories of `Price_cat`.
+
+The confusion matrix further confirms the model's difficulty, showing high misclassification rates across all categories. For instance:
+
+-   For the "Very Low" category, only 102 observations are correctly classified, while many others are misclassified as "Low", "Medium", "High", or "Very High", resulting in a class error of **74.5%**.
+
+-   Similar high error rates appear for other classes: "Low" (**78.0%**), "Medium" (**79.25%**), "High" (**82.0%**), and "Very High" (**79.0%**).
+
+These results suggest that additional model tuning, feature engineering, or the use of alternative algorithms may be necessary to improve classification performance.
+
+```{r, warning = FALSE}
+# View variable importance
+importance(model_rf)
+varImpPlot(model_rf)
+```
+
+The variable importance results show that `Bedrooms` has the highest impact on model performance, with the highest MeanDecreaseGini value (205.22), indicating it is the most influential factor in predicting `Price_cat`.\
+`Condition`, `Bathrooms`, and `Location` also contribute positively to the model’s accuracy, while `Garage` shows a negative effect, suggesting it is the least informative predictor.\
+Overall, focusing on features like `Bedrooms`, `Condition`, and `Bathrooms` is crucial for improving model predictions.
+
+### Supervised Clustering: SVM
+
+Support Vector Machines (SVM) are a type of non-probabilistic, binary classification algorithm initially designed to separate two classes. The fundamental idea behind SVM is to find an optimal hyperplane that divides the data points of different classes with the maximum possible margin. Given a training set with known class labels, SVM identifies this hyperplane to achieve the best separation.
+
+Two main scenarios arise in practice:
+
+-   If the two classes are linearly separable in the original feature space, the hyperplane can split them directly. This situation often occurs when the number of variables is much greater than the number of observations (p \>\> n).
+
+-   If the two classes are not linearly separable, SVM can either:
+
+    -   Allow a margin of error (soft margin), where some misclassifications are tolerated, or
+
+    -   Extend the feature space using kernel functions to achieve a linear separation in a higher-dimensional space.
+
+This method offers several advantages: it provides flexibility in choosing different kernel functions, allowing the model to adapt to various types of data, including non-linear relationships. Additionally, it only requires a subset of the training data (the support vectors) to define the hyperplane, making it computationally efficient. SVM is particularly effective in high-dimensional spaces, where other algorithms may struggle. Furthermore, it includes a parameter, C, which helps control overfitting, balancing the margin and classification error. Importantly, SVM's optimization problem is convex, meaning that it always converges to a solution, ensuring reliable results.
+
+However, SVM also has limitations. It is highly sensitive to noise, meaning that a few misclassified points can significantly impact the model's performance. Additionally, the predictive performance heavily depends on the choice of parameters, such as the kernel type and the C parameter, requiring careful tuning. Originally designed for binary classification, SVM can be more complex when dealing with multi-class problems. Another drawback is that SVM does not provide direct probability estimates; its outputs are deterministic, although this can be addressed with additional methods. The model can be difficult to interpret, especially in high-dimensional spaces, and for large datasets, the training process can become computationally intensive, leading to longer training times.
+
+Before performing supervised clustering, we must ensure that the variables we include are categorical. We select the relevant variables and convert them to `factor` type.
+
+```{r, warning = FALSE}
+# Select categorical variables
+data_svm <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                     "Bedrooms", "Garage", "Price_cat")]
+
+# Convert to factors
+data_svm <- data.frame(lapply(data_svm, as.factor))
+```
+
+So, we apply the SVM algorithm to the dataset (`data_svm`) to predict the price category (`Price_cat`) of properties based on several categorical features: `Location`, `Condition`, `Floors`, `Bathrooms`, `Bedrooms`, and `Garage`.
+
+```{r, warning = FALSE}
+levels(data_svm$Price_cat)
+```
+
+Since the dataset contains more than two classes and categorical predictors, the classes are not linearly separable in the original feature space. Therefore, an SVM with a radial basis function (RBF) kernel is used to extend the space and enable separation. The model handles the multiclass setting through a one-vs-one strategy internally.
+
+```{r, warning = FALSE}
+# Split the data into training and test sets
+set.seed(123)
+sample_index <- sample(1:nrow(data_svm), 0.7 * nrow(data_svm))  # 70% train
+train_data <- data_svm[sample_index, ]
+test_data <- data_svm[-sample_index, ]
+
+# Train SVM model
+# Since we have multiple classes, SVM will handle it using "one-vs-one" internally
+svm_model <- svm(
+  Price_cat ~ Location + Condition + Floors + Bathrooms + Bedrooms + Garage,
+  data = train_data,
+  kernel = "radial",  # RBF kernel for non-linear separation
+  cost = 1,          
+  scale = FALSE       
+)
+
+# Predict on test data
+predictions <- predict(svm_model, newdata = test_data)
+
+# Evaluate model performance
+confusion_matrix <- table(Predicted = predictions, Actual = test_data$Price_cat)
+print(confusion_matrix)
+
+# Calculate accuracy
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", round(accuracy * 100, 2), "%"))
+```
+
+The SVM model achieves an accuracy of **17.67%**, which indicates a low predictive performance.\
+The confusion matrix shows that predictions are quite dispersed across all categories, with no class being clearly well classified.\
+This result suggests that the current model setup, including kernel choice and parameter settings, may not be sufficient for capturing the complex structure of the data.
+
+# Complementary part
+
+In this complementary section, we explore the application of artificial neural networks as a predictive tool for estimating price values based on a set of relevant variables. Unlike traditional statistical models, neural networks offer the ability to capture complex, nonlinear relationships within data, making them particularly well-suited for tasks involving pattern recognition and forecasting. The objective of this section is to implement and evaluate a neural network model that can accurately predict the target variable—price—using the remaining dataset features as inputs. This approach not only complements the main analysis but also provides insight into the potential of machine learning techniques for predictive modeling in this context.
+
+For this analysis, we chose to use the numerical version of the price variable and treat the problem as a regression task. This approach allows us to predict the exact price value of a house rather than classifying it into predefined categories. Regression models, particularly neural networks, are well-suited for capturing complex, nonlinear relationships between input features and a continuous target variable. By using the numerical price, we gain more flexibility and precision in our predictions, making the results more informative and applicable to real-world scenarios.
+
+Before training the neural network, the dataset is preprocessed to ensure it is in a suitable format. This involves converting categorical variables into numerical representations using one-hot encoding and normalizing the input features so that they are on a similar scale, which helps improve the training performance of the model. One-hot encoding is a technique used to convert categorical variables (like "Location" or "Condition") into a numerical format.
+
+```{r, warning = FALSE}
+data_nn <- data[, c("Location", "Condition", "Floors", "Bathrooms", 
+                    "Bedrooms", "Garage", "Price")]
+
+# Convert categorical variables to factors
+data_nn$Location <- as.factor(data_nn$Location)
+data_nn$Condition <- as.factor(data_nn$Condition)
+
+# One-hot encode categorical variables
+data_nn_encoded <- model.matrix(Price ~ . - 1, data = data_nn)
+data_nn_df <- as.data.frame(data_nn_encoded)
+
+# Target variable (Price)
+data_nn_df$Price <- data_nn$Price
+
+# Normalize input features (standard scaling)
+X <- scale(data_nn_df[, -ncol(data_nn_df)])  
+y <- data_nn_df$Price                        
+```
+
+Once the data is prepared, we define a neural network model using the Keras library. The model consists of two hidden layers with ReLU activation functions. The ReLU (Rectified Linear Unit) activation function is used in the hidden layers of the neural network. It outputs:
+
+$$
+\text{ReLU}(x) =\begin{cases}x & \text{if } x > 0 \\0 & \text{if } x \leq 0\end{cases}
+$$
+
+This simple yet effective function introduces non-linearity into the model, allowing it to learn complex relationships in the data while also improving training efficiency. The output layer has a single neuron, as we are performing regression to predict a continuous price value. We compile the model using Mean Squared Error (MSE) as the loss function and Mean Absolute Error (MAE) as an additional evaluation metric. The model is then trained on the training dataset for 100 epochs, with a portion of the data used for validation during training. Finally, we evaluate the model’s performance on the test set and can generate predictions
+
+```{r nn-train, echo=TRUE, results='hide',warning = FALSE, message = FALSE, eval = nn_ok}
+# Split into training and test sets (80/20 split)
+set.seed(123)
+tensorflow::set_random_seed(123)  # reproducibility of the network
+train_indices <- sample(1:nrow(X), 0.8 * nrow(X))
+X_train <- X[train_indices, ]
+y_train <- y[train_indices]
+X_test <- X[-train_indices, ]
+y_test <- y[-train_indices]
+
+# Define the neural network model
+model <- keras_model_sequential() |>
+  layer_dense(units = 64, activation = "relu", input_shape = ncol(X)) |>
+  layer_dense(units = 32, activation = "relu") |>
+  layer_dense(units = 1)  
+
+# Compile the model
+model|>compile(
+  loss = "mse",                   
+  optimizer = optimizer_adam(),   # Adam optimizer
+  metrics = list("mae")           
+)
+
+# Train the model
+history <- model|> fit(
+  X_train, y_train,
+  epochs = 100,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+# Evaluate the model on test data
+model |> evaluate(X_test, y_test)
+```
+
+The following plot displays the training and validation performance of the neural network over the epochs. It shows how the loss (mean squared error) and the mean absolute error (MAE) evolved during the training process.
+
+```{r nn-history, warning = FALSE, eval = nn_ok}
+plot(history)
+```
+
+As shown in the graph, the training loss decreases over the epochs, but the validation loss does not improve in the same way, so the network does not learn a relationship that generalises to unseen data. This is confirmed by the test metrics below.
+
+Finally, we use the trained neural network model to make predictions on the test dataset and evaluate its performance on unseen data.
+
+```{r nn-pred, warning = FALSE, eval = nn_ok}
+# Make predictions on the test set
+predictions <- model |>predict(X_test)
+
+# Convert predictions and actual values to a data frame
+results <- data.frame(
+  Actual = y_test,
+  Predicted = as.vector(predictions)
+)
+
+# Plot predicted vs. actual prices
+plot(results$Actual, results$Predicted,
+     main = "Predicted vs Actual Prices",
+     xlab = "Actual Price",
+     ylab = "Predicted Price",
+     pch = 16, col = "blue")
+abline(a = 0, b = 1, col = "red", lwd = 2)  # Line y = x
+```
+
+```{r nn-metrics, warning = FALSE, eval = nn_ok}
+# Calculate RMSE (Root Mean Squared Error)
+rmse_value <- sqrt(mean((results$Actual - results$Predicted)^2))
+
+# Calculate R² (Coefficient of Determination)
+sst <- sum((results$Actual - mean(results$Actual))^2)
+sse <- sum((results$Actual - results$Predicted)^2)
+r2_value <- 1 - (sse / sst)
+
+# Print results
+cat("RMSE:", round(rmse_value, 2), "\n")
+cat("R-squared (R²):", round(r2_value, 4), "\n")
+```
+We have to mention that, although R² is the square of a correlation in linear regression with an intercept, it is computed here out of sample as $R^{2} = 1 - SS_{res}/SS_{tot}$, so it can be negative when the residual error is greater than the variability of the data. A negative value means that the model performs worse than simply predicting the mean price for all cases, as seen in the plot previously.
+
+Although neural networks are powerful models capable of capturing complex, non-linear relationships, in our case they did not perform significantly better than simpler models. This is likely due to the nature of our dataset: the data appears quite uniform, and no strong patterns or correlations between features and the target variable were evident during training. The model showed signs of underfitting, suggesting that the input variables may not contain enough predictive information for this type of task.
+
+# Conclusion
+
+Throughout the initial exploratory analysis, we observed a critical weakness in the dataset: the absence of strong relationships between features and the target variable, Price. The correlation matrix showed that numerical variables are nearly uncorrelated with each other and with price — with most correlation coefficients close to 0. Similarly, categorical variables showed no statistically significant association with price in both Chi-squared and ANOVA tests. This led us to hypothesize that most of the variables behave as if they are independent from the target.
+
+As a result, the performance of most statistical and machine learning models was severely affected. Since we categorized Price into quintiles (i.e., five price groups), a random classifier would be expected to achieve around 20% accuracy by chance. Unfortunately, the models we implemented all yielded accuracies between 17% and 22%. Ideally, we would expect any reasonable predictive model to significantly outperform random guessing, which was not the case here.
+
+These poor results reflect the lack of meaningful signal in the data. In fact, several concrete examples from the dataset suggest that the data may have been synthetically generated or randomly filled without realistic constraints. For instance, we find cases where:
+
+Rural houses, in poor condition, with one bedroom, priced at nearly 1 million.
+
+```{r}
+# View extremely expensive rural house in poor condition
+head(data %>%
+  filter(Location == "Rural", Condition == "Poor", Bedrooms <= 1, Price > 900000) %>%
+   select(1:11))
+```
+
+A house with three floors and in excellent condition, is priced at just 25,000.
+
+```{r}
+# View old house with excellent condition and very low price
+head(data %>%
+  filter(Condition == "Excellent", Price_cat == "Very Low", Floors >= 3) %>%
+  select(1:11))
+
+```
+Other houses with identical features have drastically different prices with no discernible explanation.
+
+
+```{r}
+# View houses with identical features but very different prices
+head(data %>%
+  group_by(Bedrooms, Bathrooms, Floors, Location, Condition, Garage) %>%
+  filter(n() > 1) %>%
+  arrange(Bedrooms, Bathrooms, Floors, Location, Condition, Garage) %>%
+  select(Id,Bedrooms, Bathrooms, Floors, Location, Condition, Garage, Price_cat,Price))
+
+```
+
