@@ -1,0 +1,407 @@
+---
+title: "Frecuencia de siniestros en seguros de automóvil: modelos Poisson con datos telemáticos"
+author: "Laura Sacristán Herencia"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_libraries, include=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+The data set datostelemat.csv contains information about claims of policyholders in motor insurance during last year (Table 1):
+
+```{r, warning = FALSE, echo=FALSE}
+kable(data.frame(Variables= c("sex","excess","urban","y","km","antigc"), Description= c("Gender","Excess of speed over the mandatory limits: Sí = More than 5% of the km, No = Lower than 5% of the km","Urban driving: Sí = More than 25% of km, No = Lower than 5% of km","Number of claims during the last year","Km during the year", "Driving experience: 1 = less than 2 years, 2 = at least 2 years")))
+```
+
+Perform the following calculations:
+
+a)  Import the data to R.
+
+```{r}
+if (!file.exists("data/datostelemat.csv")) {
+  stop("Dataset not found: place datostelemat.csv in the data/ folder (see data/README.md).")
+}
+data <- read.csv("data/datostelemat.csv")
+data<-as.data.frame(data)
+
+n.var <-names(data)
+
+head(data)
+```
+
+b)  Describe the variables in the data set.
+
+    1.  Sex (Género)
+        1.  Tipo: Categórica (factor)
+
+        2.  Descripción: Género del conductor.
+
+        3.  Valores esperados: "man", "woman"
+
+    ```{r}
+    table(data$sex)
+    prop.table(table(data$sex))
+    ```
+
+    Observamos que está muy compensado.
+
+<!-- -->
+
+2.  Excess (Exceso de velocidad)
+
+    1.  Tipo: Categórica (factor)
+    2.  Descripción: Indica si el conductor excede el límite de velocidad más del 5% del trayecto.
+    3.  Valores: "yes", "no"
+
+    ```{r}
+    table(data$excess)
+    prop.table(table(data$excess))
+    ```
+
+    Nuevamente, la proporción está muy igualada.
+
+3.  Urban (Conducción urbana)
+
+    1.  Tipo: Categórica (factor)
+    2.  Descripción: Indica si más del 25% del trayecto fue en zonas urbanas.
+    3.  Valores: "yes", "no"
+
+    ```{r}
+    table(data$urban)
+    prop.table(table(data$urban))
+    ```
+
+    En este caso, hay mayor número de personas (un 60%) que no acostumbra a hacer más del 25% del trayecto en zonas urbanas.
+
+4.  y (Número de siniestros del último año)
+
+    1.  Tipo: Numérica (discreta, conteo)
+    2.  Descripción: Número de reclamaciones o siniestros reportados en el último año.
+    3.  Resumen estadístico: Mínimo, máximo, media, mediana, desviación estándar.
+
+    ```{r}
+    summary(data$y)
+    sd(data$y)
+    ```
+
+    La mayoría de los conductores no tuvo ningún siniestro en el último año. Solo una pequeña parte tuvo entre 1 y 4, lo cual se refleja en la media baja y la asimetría (hay muchos ceros y pocos casos con valores altos). Esto podría llevar a una distribución sesgada a la derecha.
+
+5.  km (Kilómetros recorridos)
+
+    1.  Tipo: Numérica (continua)
+    2.  Descripción: Kilómetros recorridos durante el año.
+    3.  Resumen estadístico: Mínimo, máximo, media, mediana, desviación estándar.
+
+    ```{r}
+    summary(data$km)
+    sd(data$km)
+    ```
+
+    Los conductores recorren en promedio unos 12,000 km al año, aunque hay bastante variabilidad. Hay una diferencia considerable entre el mínimo y el máximo, lo que indica diversidad en el uso del vehículo (desde conductores ocasionales hasta muy activos).
+
+6.  antigc (Antigüedad del carné de conducir)
+
+    1.  Tipo: Categórica (ordinal)
+
+    2.  Descripción: Experiencia del conductor.
+
+    3.  Valores esperados:
+
+        -   1 = Menos de 2 años
+        -   2 = 2 años o más
+
+        ```{r}
+        table(data$antigc)
+        prop.table(table(data$antigc))
+        ```
+
+        Esta variable tambien está muy balanceada: proporción muy similar entre personas con más de dos años de carnet y con menos de dos años de carnet.
+
+
+c)  Calculate summary descriptive statistics depending on claim occurrence. Do an interpretation of the results.
+
+```{r, warning = FALSE}
+resumen_siniestros <- data %>%
+  group_by(y) %>%
+  summarise(
+    cantidad = n(),
+    media_km = mean(km),
+    mediana_km = median(km),
+    desv_km = sd(km),
+    media_antig = mean(as.numeric(antigc)),
+    prop_exceso = mean(excess == "yes"),
+    prop_urbano = mean(urban == "yes")
+  )
+kable(resumen_siniestros, digits = 2, caption = "Resumen según el número de siniestros")
+```
+
+Al analizar las variables según el número de siniestros durante el último año, se observan las siguientes tendencias:
+
+-   **Kilometraje anual (km):** Existe una relación positiva entre el número de siniestros y el promedio de kilómetros recorridos, ya que, observamos que los conductores sin siniestros recorren en promedio 11.790 km, mientras que quienes han tenido dos siniestros recorren cerca de 14.661 km al año. Esto sugiere que una mayor exposición (más kilómetros) está asociada a una mayor probabilidad de siniestro.
+
+-   **Antigüedad del carné (antigc)**: La media de antigüedad del carné disminuye levemente conforme aumenta el número de siniestros, lo cual sugiere que los conductores con menos experiencia presentan una mayor frecuencia de siniestros. Además, podemos observar como todos los conductores con tres siniestros tienen una antigüedad de menos de 2 años, lo que refuerza esta idea.
+
+-   **Exceso de velocidad (excess)**: La proporción de conductores con exceso de velocidad aumenta con el número de siniestros: desde un 50% entre los que no tuvieron siniestros hasta un 80% en aquellos con tres siniestros. Esto sugiere una posible relación positiva entre el exceso de velocidad y la siniestralidad.
+
+-   **Conducción urbana (urban)**: La proporción de conducción urbana aumenta ligeramente con el número de siniestros. No obstante, la relación no es tan clara ni consistente como en el caso del exceso de velocidad.
+
+En resumen, los resultados muestran que la frecuencia de siniestros aumenta con el kilometraje y tiende a ser mayor en conductores con menor antigüedad. Esto respalda la inclusión de estas variables como factores de riesgo en modelos actuariales.
+
+d)  Calculate summary descriptive statistics depending on gender. Do an interpretation of the results.
+
+```{r, warning = FALSE}
+resumen_sexo <- data %>%
+  group_by(sex) %>%
+  summarise(
+    cantidad = n(),
+    media_siniestros = mean(y),
+    media_km = mean(km),
+    mediana_km = median(km),
+    desv_km = sd(km),
+    media_antig = mean(as.numeric(antigc)),
+    prop_exceso = mean(excess == "yes"),
+    prop_urbano = mean(urban == "yes")
+  )
+kable(resumen_sexo, digits = 2, caption = "Resumen según género")
+```
+
+Al analizar las variables según el género del conductor, se observan las siguientes tendencias:
+
+-   **Frecuencia de siniestros (y):** Los hombres presentan una media de 0.17 siniestros por año, frente a 0.14 en el caso de las mujeres. Esto sugiere que, en promedio, los hombres tienen una mayor frecuencia de siniestros.
+
+-   **Kilometraje anual (km):** Los hombres recorren más kilómetros al año (12.283 km) que las mujeres (11.661 km), lo cual puede estar relacionado con su mayor exposición al riesgo.
+
+-   **Antigüedad del carné (antigc)**: No se observan diferencias significativas, ya que ambos géneros presentan una media de la variable (codificada 1 = menos de 2 años, 2 = 2 años o más) cercana a 1.5, lo que representa una proporción equilibrada entre conductores noveles y experimentados.
+
+-   **Exceso de velocidad (excess)**: El 60% de los hombres superan con frecuencia los límites de velocidad, frente a solo un 40% de las mujeres, lo que sugiere una mayor tendencia al exceso de velocidad entre los conductores hombres.
+
+-   **Conducción urbana (urban)**: La proporción de conducción urbana es igual entre ambos géneros, lo que indica que no hay diferencias relevantes en cuanto al entorno de conducción según el sexo.
+
+En resumen, los hombres tienden a conducir más kilómetros y presentan una mayor frecuencia de siniestros, lo que puede estar asociado a una mayor exposición al riesgo. Esto respalda la inclusión del género como una variable explicativa como factores de riesgo en modelos actuariales.
+
+e)  Fit a Poisson regression model for the claim frequency by using only the traditional risk factors (gender and driving experience) in Table 1 as covariates. Do an interpretation of the results.
+
+```{r}
+Modelo1 <- glm(y ~ sex + antigc, family = poisson, data = data)
+
+summary(Modelo1)
+```
+
+**Intercepto**: El valor estimado del intercepto es -1.622, lo que implica que la frecuencia esperada de siniestros para un hombre con menos de 2 años de experiencia es aproximadamente $exp(− 1.622)≈0.197$.
+
+**Sexo**: El coeficiente asociado al sexo femenino es -0.184 con p \< 0.001, lo que indica que, manteniendo constante la experiencia, las mujeres tienen en promedio un 16.9% menos de siniestros que los hombres: $exp(−0.184)≈0.831$.
+
+**Antigüedad del carné:** El coeficiente correspondiente a tener más de 2 años de experiencia es -0.114 con p = 0.033, lo que sugiere que los conductores con mayor experiencia presentan una frecuencia de siniestros un 10.8% menor que los conductores noveles: $exp(−0.114)≈0.892$.
+
+Ambas variables consideradas son **estadísticamente significativas**, confirmando que tanto el sexo como la experiencia del conductor influyen en la probabilidad de sufrir siniestros. En particular, las mujeres y los conductores con más experiencia muestran una menor frecuencia de siniestros. 
+
+f)  Fit a Poisson regression model for the claim frequency by using the traditional and telematics risk factors in Table 1 as covariates. Use the number of kilometers as a classical offset in the model. Do an interpretation of the results. Do you think that this model is better than the model in e)? Justity your answer.
+
+```{r}
+Modelo2 <- glm(y ~ sex + antigc + excess + urban, 
+               data = data, 
+               family = poisson, 
+               offset = log(km))
+
+summary(Modelo2)
+```
+
+-   **Sexo**: El coeficiente correspondiente a ser mujer es -0.107 con un valor p = 0.0486, lo que indica que las conductoras presentan una frecuencia de siniestros un **10.2% menor** que los conductores hombres: $exp(−0.107)≈0.898$.
+
+-   **Antigüedad del carné**: El coeficiente correspondiente a tener más de 2 años de experiencia es -0.121 con p = 0.0232, lo que sugiere que los conductores con mayor experiencia presentan una frecuencia de siniestros un **11.4% menor** que los conductores noveles: $exp(−0.121)≈0.886$.
+
+-   **Exceso de velocidad**: El coeficiente asociado a haber cometido exceso de velocidad es 0.134 con p = 0.0139, lo que implica que los conductores que superan los límites de velocidad presentan una frecuencia de siniestros un **14.3% mayor** que quienes no lo superan: $exp(0.134)≈1.143$.
+
+-   **Conducción urbana**: El coeficiente para tener más del 25% de los kilómetros recorridos en entorno urbano es 0.121 con p = 0.0248. Esto sugiere que los conductores con mayor exposición urbana tienen una frecuencia de siniestros un **12.9% mayor** que aquellos que circulan menos en zonas urbanas: $exp(0.121)≈1.129$
+
+Utilizamos **AIC** para comprobar que modelo ofrece un mejor ajuste estadístico:
+
+```{r}
+AIC(Modelo1)
+AIC(Modelo2)
+```
+
+Observamos, en los resumenes anteriores, que la desviación residual aumenta (de 5629.2 a 5725.7). Por último, observamos que el **AIC empeora** del Modelo1 al Modelo2 (de 8283 a 8383), lo cual indica un **mejor ajuste estadístico del primer modelo**.
+
+g)  By using model f) calculate the premium for for an individual with sex = "man", excess = "no", urban = "yes", antigc = 1 and km = 10000, assuming that the average claim cost is 2000 euros. Which is the percentage of variation in the premium if excess = "yes" for that individual? Discuss the results.
+
+Vamos a calcular la **prima** para un individuo con las siguientes características:
+
+```{r}
+nuevo <- data.frame(
+  sex = factor("man", levels = c("woman", "man")),
+  antigc = 1,
+  excess = factor("no", levels = c("no", "yes")),
+  urban = factor("yes", levels = c("no", "yes")),
+  km = 10000
+)
+```
+
+```{r}
+frecuencia <- predict(Modelo2, newdata = nuevo, type = "response")
+prima <- frecuencia * 2000
+cat("La prima para el asegurado con estas características es:", round(prima, 2), "euros\n")
+```
+
+Ahora estudiamos el caso en que la variable exceso es "yes", es decir, cuando el conductor tiende a superar la velocidad de la vía.
+
+```{r}
+nuevo_con_exceso <- nuevo
+nuevo_con_exceso$excess <- factor("yes", levels = c("no", "yes"))
+
+frecuencia_exceso <- predict(Modelo2, newdata = nuevo_con_exceso, type = "response")
+prima_exceso <- frecuencia_exceso * 2000
+cat("La prima para el asegurado con exceso de velocidad es:", round(prima_exceso, 2), "euros\n")
+```
+
+Calculamos la variación del primer al segundo caso:
+
+```{r}
+variacion <- (prima_exceso - prima) / prima * 100
+variacion
+```
+
+La prima para un conductor que presenta exceso de velocidad es aproximadamente un 14,33% mayor que la de un conductor equivalente sin exceso. Esto indica que el comportamiento de conducción imprudente (como exceder los límites de velocidad) tiene un impacto significativo en el coste del seguro, reflejando un mayor riesgo de siniestro.
+
+h)  Fit a Poisson regression model for the claim frequency by using the traditional and telematics risk factors in Table 1 as covariates. Use the number of kilometers as a generalized offset in the model (as described in Boucher et al., 2013). Do an interpretation of the results.
+
+En el artículo de Boucher et al. (2013), se propone un modelo donde el número de kilómetros recorridos (km) no se trata como un offset clásico (log(km) con coeficiente fijado a 1, es decir, riesgo proporcional a los km), sino que se incluye log(km) como covariable con un coeficiente estimado a partir de los datos.
+
+```{r}
+modelo_Boucher <- glm(y ~ sex + antigc + excess + urban + log(km),
+                           data = data,
+                           family = poisson)
+summary(modelo_Boucher)
+```
+
+-   **Sexo**: El coeficiente estimado es -0.137 con p = 0.012, lo que indica que, manteniendo constantes el resto de variables, las mujeres presentan una frecuencia de siniestros aproximadamente un **12.8% menor** que los hombres: $exp(−0.137)≈0.872$.
+
+-   **Antigüedad del carné**: El coeficiente es -0.116 con p = 0.029, lo que sugiere que los conductores con al menos 2 años de experiencia tienen una frecuencia de siniestros **10.9% menor** que los conductores noveles: $exp(−0.116)≈0.890$.
+
+-   **Exceso de velocidad**: El coeficiente es 0.130 con p = 0.017, lo que implica que los conductores que exceden la velocidad en más del 5% del trayecto tienen una frecuencia de siniestros **13.9% mayor** que aquellos que no lo hacen: $exp⁡(0.130)≈1.139$.
+
+-   **Conducción urbana**: El coeficiente es 0.120 con p = 0.026, indicando que aquellos que conducen en zonas urbanas más del 25% del tiempo presentan una frecuencia de siniestros **12.8% mayor** que quienes lo hacen en menor proporción: $exp⁡(0.120)≈1.128$.
+
+-   **Logaritmo de los kilómetros (`log(km)`)**: El coeficiente estimado es 0.361 con p \< 2e-16, lo cual indica que el número de siniestros aumenta con los kilómetros recorridos, pero de manera **subproporcional**. Específicamente, un aumento del 1% en el kilometraje se asocia con un incremento del **0.36%** en la frecuencia de siniestros.
+
+Esto confirma que el modelo permite capturar una relación más flexible entre la exposición (km) y la frecuencia, en lugar de asumir proporcionalidad exacta como en el offset clásico (que equivale a fijar el coeficiente de log(km) en 1).
+
+i)  Compare the premiums for models f) and h) for an individual with sex = "man", excess = "yes", urban = "yes", antigc = 1 and different values of km (5000,10000,15000,20000 and 25000), assuming that the average claim cost is 2000 euros. Discuss the results.
+
+```{r}
+# Características del individuo
+nuevos_datos <- data.frame(
+  sex = factor("man", levels = c("man", "woman")),
+  antigc = 1,
+  excess = factor("yes", levels = c("no", "yes")),
+  urban = factor("yes", levels = c("no", "yes")),
+  km = c(5000, 10000, 15000, 20000, 25000)
+)
+```
+
+```{r}
+# Modelo f) con offset clásico
+pred_f <- predict(Modelo2, newdata = nuevos_datos, type = "response")
+prima_f <- pred_f * 2000
+
+# Modelo h) con offset generalizado
+pred_h <- predict(modelo_Boucher, newdata = nuevos_datos, type = "response")
+prima_h <- pred_h * 2000
+
+cat("La prima para el modelo f):", round(prima_f, 2), "euros\n")
+
+cat("La prima para el modelo h):", round(prima_h, 2), "euros\n")
+```
+
+-   **Modelo f**: asume una relación proporcional entre los kilómetros recorridos y la frecuencia de siniestros. Esto se refleja en el crecimiento lineal de la prima: cada 5000 km adicionales, la prima aumenta en aproximadamente 163 euros.
+
+-   **Modelo h**: estima el efecto del número de kilómetros directamente a partir de los datos, permitiendo mayor flexibilidad. El coeficiente de log(km) es 0.36, lo que significa que el riesgo aumenta con los kilómetros, pero de manera subproporcional. Como resultado, la prima crece con los kilómetros, pero a un ritmo más lento (no proporcional).
+
+En conclusión, el modelo h (offset generalizado) es más realista y flexible, ya que ajusta el impacto de los kilómetros según lo observado en los datos. Mientras que el modelo f (offset clásico) puede ser adecuado cuando hay una justificación fuerte para asumir proporcionalidad.
+
+j)  Compare the Poisson models in f) and h). ¿Which one do you think that is the best in order to capture the relationship between the claim frequency and the distance traveled? Justify your answer. Use appropriate plots to discuss it.
+
+```{r}
+newdata <- data.frame(
+  sex = factor("man", levels = c("man", "woman")),
+  antigc = 1,
+  excess = factor("yes", levels = c("no", "yes")),
+  urban = factor("yes", levels = c("no", "yes")),
+  km = seq(1000, 30000, by = 1000)
+)
+
+pred_f <- predict(Modelo2, newdata = newdata, type = "response")
+pred_h <- predict(modelo_Boucher, newdata = newdata, type = "response")
+
+
+plot(newdata$km, pred_f, type = "l", col = "blue", lwd = 2,
+     xlab = "Kilómetros anuales", ylab = "Frecuencia esperada de siniestros",
+     main = "Comparación de modelos Poisson: f) vs h)")
+lines(newdata$km, pred_h, col = "red", lwd = 2, lty = 2)
+legend("topleft", legend = c("Modelo f) offset clásico", "Modelo h) offset generalizado"),
+       col = c("blue", "red"), lty = c(1,2), lwd = 2)
+```
+```{r, warning=FALSE}
+data$km_bin <- cut(data$km,
+                   breaks = seq(floor(min(data$km) / 2000) * 2000,
+                                ceiling(max(data$km) / 2000) * 2000, by = 2000),
+                   include.lowest = TRUE)
+
+obs_freq <- data %>%
+  group_by(km_bin) %>%
+  summarise(
+    total_claims = sum(y),
+    total_km = sum(km),
+    observed_freq = total_claims / total_km
+  )
+
+data$pred_f <- predict(Modelo2, type = "response") / data$km
+data$pred_h <- predict(modelo_Boucher, type = "response") / data$km
+
+pred_freq <- data %>%
+  group_by(km_bin) %>%
+  summarise(
+    pred_freq_f = mean(pred_f),
+    pred_freq_h = mean(pred_h)
+  )
+
+plot_data <- left_join(obs_freq, pred_freq, by = "km_bin")
+
+ggplot(plot_data, aes(x = km_bin)) +
+  geom_point(aes(y = observed_freq, color = "Observado"), size = 2) +
+  geom_line(aes(y = pred_freq_f, group = 1, color = "Modelo f) offset clásico"),
+            linetype = "dashed", linewidth = 1) +
+  geom_line(aes(y = pred_freq_h, group = 1, color = "Modelo h) offset generalizado"),
+            linewidth = 1) +
+  labs(title = "Frecuencia de siniestros: observado vs. predicho por kilómetros recorridos",
+       x = "Kilómetros", y = "Frecuencia de siniestros por km", color = "") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, max(plot_data$observed_freq, na.rm = TRUE) * 1.1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_manual(values = c("Observado" = "black",
+                                "Modelo f) offset clásico" = "blue",
+                                "Modelo h) offset generalizado" = "red"))
+```
+
+Además de los gráficos, comparamos formalmente ambos modelos. El modelo f) es un caso particular del h) (el coeficiente de log(km) fijado a 1), por lo que podemos usar el AIC y un contraste de razón de verosimilitudes:
+
+```{r}
+AIC(Modelo2, modelo_Boucher)
+anova(Modelo2, modelo_Boucher, test = "Chisq")
+```
+
+El modelo f) asume una proporcionalidad rígida entre los km recorridos y el riesgo, lo que se traduce por ejemplo en que recorrer el doble de kilómetros implica tener el doble de riesgo, lo cual puede ser una suposición demasiado estricta. En cambio, el modelo h) permite que el propio modelo aprenda cómo influye realmente el kilometraje en los siniestros. Los resultados muestran que, aunque el riesgo aumenta con los kilómetros, **no lo hace de forma proporcional**, sino de manera más moderada. En este caso, el coeficiente ajustado para log(km) es aproximadamente 0.36 (visto en el apartado anterior), lo que sugiere que duplicar el kilometraje anual solo incrementa la frecuencia de siniestros esperada aproximadamente un 30-40%, en lugar de un 100%.
+
+Además, las primas calculadas con el modelo h) crecen más suavemente con los kilómetros, lo que resulta más realista y evita penalizar en exceso a los conductores que recorren largas distancias. Por tanto, **el modelo h) se considera más adecuado**, ya que refleja mejor la relación entre los kilómetros recorridos y el riesgo de siniestro.
+
+
