@@ -1,0 +1,344 @@
+---
+title: "Análisis de supervivencia: duración de la baja laboral tras una operación"
+author: "Laura Sacristán Herencia"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_libraries, include=FALSE}
+library(knitr)
+library(survival)
+library(survminer)
+
+# Funciones auxiliares para que los números del texto salgan siempre de los modelos
+fmt_p     <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("= %.3f", p))
+coef_aft  <- function(m, v) round(coef(m)[[v]], 2)
+tr_aft    <- function(m, v) round(exp(coef(m)[[v]]), 2)
+p_aft     <- function(m, v) fmt_p(summary(m)$table[v, "p"])
+hr_cox    <- function(m, v) round(exp(coef(m)[[v]]), 2)
+p_cox     <- function(m, v) fmt_p(summary(m)$coefficients[v, "Pr(>|z|)"])
+```
+
+# Datos y planteamiento
+
+Se dispone del archivo HOSPI.csv que contiene datos sobre un colectivo de profesionales que tienen una póliza que les paga una indemnización por cada día de baja laboral. Todos ellos se han sometido a una operación, y la variable duración indica el tiempo (en meses) de la situación de baja laboral tras la operación. El resto de variables son las siguientes:
+
+```{r, echo=FALSE}
+kable(data.frame(Variables= c("time","status","x1","x2","x3"), Descripcion= c("duración de la baja laboral tras la operación, en meses","0 (censura), 1 (evento)","1 = asegurado menor de 40 años, 0 = mayor de 40 años","1 = la operación ha sido menor, 0 = la operación no ha sido menor", "1 = persisten otras patologías después de la operación, 0 = no persisten otras patologías")))
+```
+
+En este problema el **evento** (`status = 1`) es la reincorporación al trabajo, es decir, el fin de la baja. Por tanto, una curva de supervivencia que baja más rápido corresponde a bajas más cortas.
+
+Antes de resolver los siguientes apartados, importamos los datos.
+
+```{r}
+if (!file.exists("data/HOSPI.csv"))
+  stop("Falta data/HOSPI.csv: consulta data/README.md")
+datos <- read.csv2("data/HOSPI.csv", row.names = NULL)
+
+# Aseguramos que la variable time sea numerica
+datos$time <- as.numeric(as.character(datos$time))
+
+head(datos) 
+```
+
+Los apartados que se resuelven son:
+
+a)  Haz una estimación de la función de supervivencia para todos los asegurados usando Kaplan y Meier. ¿Cuál es la probabilidad de que un asegurado esté de baja más de 2 semanas (medio mes)?
+
+    ```{r}
+    # Kaplan-Meier
+    km_fit <- survfit(Surv(time = datos$time, event = datos$status, type="right") ~ 1, 
+                      data = datos, type = "kaplan-meier")
+
+    summary(km_fit)$surv
+    ```
+
+    ```{r}
+    # Probabilidad de estar aún de baja después de 0.5 meses
+    prob_mas_de_medio_mes <- summary(km_fit, times = 0.5)$surv
+
+    cat("Probabilidad de estar de baja más de 2 semanas (0.5 meses):", 
+        round(prob_mas_de_medio_mes, 4), "\n")
+    ```
+
+b)  Haz una estimación de la función de supervivencia para los diferentes grupos definidos por x1 usando Kaplan y Meier. Representa gráficamente las curvas de supervivencia. Haz un test para ver si hay diferencias significativas en las curvas de supervivencia de ambos grupos definidos por x1. Interpreta los resultados.
+
+    ```{r}
+    # Ajustar Kaplan-Meier según x1
+    km_fit_x1 <- survfit(Surv(time = datos$time, event = datos$status, type="right") ~ x1, 
+                         data= datos, type = "kaplan-meier")
+
+    summary(km_fit_x1)$surv
+    ```
+
+    ```{r}
+    plot_km_x1 <- ggsurvplot(
+      km_fit_x1,
+      data = datos,
+      pval = TRUE,                  # p-value
+      conf.int = TRUE,              # bandas de confianza
+      legend.labs = c("≥ 40 años", "< 40 años"),
+      legend.title = "Edad",
+      xlab = "Meses de baja",
+      ylab = "Probabilidad de supervivencia",
+      palette = c("#E69F00", "#56B4E9"),
+    )
+
+    print(plot_km_x1$plot)
+
+
+    ```
+
+    ```{r}
+    # Test de comparación de curvas de supervivencia: log-rank
+    surv_obj <- Surv(time = datos$time, event = datos$status)
+    logrank_test_x1 <- survdiff(surv_obj ~ x1, data = datos)
+    logrank_test_x1
+    ```
+
+    ```{r}
+    p_valor <- 1 - pchisq(logrank_test_x1$chisq, df = length(logrank_test_x1$n) - 1)
+    cat("P-valor del test log-rank:", p_valor, "\n")
+
+    ```
+
+    Observamos que el P-valor es notablemente más pequeño que 0.05, lo que sugiere que hay diferencias estadísticamente significativas entre los grupos de edad en cuanto al tiempo de baja.
+
+c)  Haz una estimación de la función de supervivencia para los diferentes grupos definidos por x2 usando Kaplan y Meier. Representa gráficamente las curvas de supervivencia. Haz un test para ver si hay diferencias significativas en las curvas de supervivencia de ambos grupos definidos por x2. Interpreta los resultados.
+
+    ```{r}
+    # Ajustar Kaplan-Meier según x2
+    km_fit_x2 <- survfit(Surv(time = datos$time, event = datos$status, type="right") ~ x2, 
+                         data= datos, type = "kaplan-meier")
+
+    summary(km_fit_x2)$surv
+    ```
+
+    ```{r}
+    plot_km_x2 <- ggsurvplot(
+      km_fit_x2,
+      data = datos,
+      pval = TRUE,
+      conf.int = TRUE,
+      legend.labs = c("No menor", "Menor"),
+      legend.title = "Tipo de operación",
+      xlab = "Meses de baja",
+      ylab = "Probabilidad de supervivencia",
+      palette = c("#D55E00", "#0072B2"),
+    )
+
+    print(plot_km_x2$plot)
+    ```
+
+    ```{r}
+    # Test de comparación de curvas de supervivencia: log-rank
+    surv_obj <- Surv(time = datos$time, event = datos$status)
+    logrank_test_x2 <- survdiff(surv_obj ~ x2, data = datos)
+    logrank_test_x2
+    ```
+
+    ```{r}
+    p_valor <- 1 - pchisq(logrank_test_x2$chisq, df = length(logrank_test_x2$n) - 1)
+    cat("P-valor del test log-rank:", p_valor, "\n")
+    ```
+
+    Observamos que el P-valor es muy cercano a 0, lo que sugiere que hay diferencias estadísticamente significativas entre la duración de la baja laboral según el tipo de operación.
+
+d)  Haz una estimación de la función de supervivencia para los diferentes grupos definidos por x3 usando Kaplan y Meier. Representa gráficamente las curvas de supervivencia. Haz un test para ver si hay diferencias significativas en las curvas de supervivencia de ambos grupos definidos por x3. Interpreta los resultados.
+
+    ```{r}
+    # Ajustar Kaplan-Meier según x3
+    km_fit_x3 <- survfit(Surv(time = datos$time, event = datos$status, type="right") ~ x3, 
+                         data = datos, type = "kaplan-meier")
+
+    summary(km_fit_x3)$surv
+    ```
+
+    ```{r}
+    plot_km_x3 <- ggsurvplot(
+      km_fit_x3,
+      data = datos,
+      pval = TRUE,
+      conf.int = TRUE,
+      legend.labs = c("Sin patologías persistentes", "Con patologías persistentes"),
+      legend.title = "Patologías tras operación",
+      xlab = "Meses de baja",
+      ylab = "Probabilidad de supervivencia",
+      palette = c("#009E73", "#CC79A7"),
+      risk.table = TRUE
+    )
+
+    print(plot_km_x3$plot)
+    ```
+
+    ```{r}
+    # Test de comparación de curvas de supervivencia: log-rank
+    surv_obj <- Surv(time = datos$time, event = datos$status)
+    logrank_test_x3 <- survdiff(surv_obj ~ x3, data = datos)
+    logrank_test_x3
+    ```
+
+    ```{r}
+    p_valor <- 1 - pchisq(logrank_test_x3$chisq, df = length(logrank_test_x3$n) - 1)
+    cat("P-valor del test log-rank:", p_valor, "\n")
+    ```
+
+    Observamos que el P-valor es notablemente más pequeño que 0.05, lo que sugiere que la presencia de patologías persistentes influye significativamente en el tiempo de baja.
+
+e)  Ajusta un modelo AFT Weibull y otro Exponencial para time en función de x1, x2 y x3. Interpreta los resultados de ambos modelos. ¿Cuál te parece mejor? Justifica tu respuesta.
+
+    ```{r}
+    # Modelo AFT con distribución Weibull
+    aft_weibull <- survreg(Surv(time, status) ~ x1 + x2 + x3, 
+                           data = datos, dist = "weibull")
+    summary(aft_weibull)
+    ```
+
+    Coeficientes del modelo Weibull (escala log-tiempo): `x1` = `r coef_aft(aft_weibull, "x1")` (p `r p_aft(aft_weibull, "x1")`), `x2` = `r coef_aft(aft_weibull, "x2")` (p `r p_aft(aft_weibull, "x2")`) y `x3` = `r coef_aft(aft_weibull, "x3")` (p `r p_aft(aft_weibull, "x3")`). Como el evento es la reincorporación, un coeficiente negativo implica bajas más cortas y uno positivo, bajas más largas. En términos de razón de tiempos, la duración de la baja se multiplica por `r tr_aft(aft_weibull, "x1")` para `x1`, por `r tr_aft(aft_weibull, "x2")` para `x2` y por `r tr_aft(aft_weibull, "x3")` para `x3` (valores menores que 1 indican bajas más cortas).
+
+    ```{r}
+    # Modelo AFT con distribución Exponencial
+    aft_exp <- survreg(Surv(time, status) ~ x1 + x2 + x3, 
+                       data = datos, dist = "exponential")
+    summary(aft_exp)
+    ```
+
+    Coeficientes del modelo exponencial: `x1` = `r coef_aft(aft_exp, "x1")` (p `r p_aft(aft_exp, "x1")`), `x2` = `r coef_aft(aft_exp, "x2")` (p `r p_aft(aft_exp, "x2")`) y `x3` = `r coef_aft(aft_exp, "x3")` (p `r p_aft(aft_exp, "x3")`). La razón de tiempos es `r tr_aft(aft_exp, "x1")` para `x1`, `r tr_aft(aft_exp, "x2")` para `x2` y `r tr_aft(aft_exp, "x3")` para `x3`, con la misma interpretación que en el modelo Weibull.
+
+    Dado que la distribución es exponencial, la escala está fijada en 1, lo cual implica que el riesgo es constante en el tiempo.
+
+    Para comparar los modelos, utilizamos AIC, el cual penaliza la complejidad del modelo pero premia el buen ajuste.
+
+    ```{r}
+    AIC(aft_weibull, aft_exp)
+    ```
+
+    El modelo con menor AIC es el **`r c("Weibull", "exponencial")[which.min(c(AIC(aft_weibull), AIC(aft_exp)))]`**. La exponencial es un caso particular de la Weibull con riesgo constante en el tiempo (escala fijada en 1), por lo que la comparación indica si ese supuesto simplificador es razonable.
+
+f)  Ajusta un modelo de Cox para time en función de x1, x2 y x3. Interpreta los resultados. Utilizando este modelo de Cox, representa las curvas de supervivencia de dos asegurados con las siguientes características e interpreta los resultados. Para cada uno de estos dos asegurados y usando el modelo de Cox que acabas de ajustar ¿cuál sería la probabilidad de que la baja laboral dure más de dos semanas (medio mes)?
+
+    ```{r}
+    # Modelo Cox para time en función de x1, x2 y x3
+    cox_model <- coxph(Surv(time, status) ~ x1 + x2 + x3, data = datos)
+    summary(cox_model)
+    ```
+
+    Hazard ratios del modelo de Cox (riesgo instantáneo de reincorporación, es decir, de que termine la baja): `x1` (menor de 40 años) = `r hr_cox(cox_model, "x1")` (p `r p_cox(cox_model, "x1")`), `x2` (operación menor) = `r hr_cox(cox_model, "x2")` (p `r p_cox(cox_model, "x2")`) y `x3` (patologías persistentes) = `r hr_cox(cox_model, "x3")` (p `r p_cox(cox_model, "x3")`). Un HR mayor que 1 indica que el grupo se reincorpora antes (baja más corta) y uno menor que 1, que su baja es más larga.
+
+    El modelo presenta una concordancia de `r round(100 * summary(cox_model)$concordance[1], 1)`%, que mide su capacidad para ordenar qué individuos se reincorporan antes.
+
+    A continuación, se representa las curvas de supervivencia de dos asegurados con los perfiles que se muestran en la siguiente tabla:
+
+```{r, echo=FALSE}
+kable(data.frame(Variables= c("x1","x2","x3"), Primer_asegurado= c("0","0","1"), Segundo_asegurado= c("0","1","1")))
+```
+
+```{r}
+# Características de los dos asegurados
+asegurados <- data.frame(
+  x1 = c(0, 0),
+  x2 = c(0, 1),
+  x3 = c(1, 1)
+)
+```
+
+Es decir, el primer asegurado es mayor de 40 años, ha tenido una operación mayor y presenta patologías persistentes tras la operación. El segundo asegurado también es mayor de 40 años, pero ha tenido una operación menor y presenta patologías persistentes.
+
+```{r}
+# Estimar curvas de supervivencia
+supervivencia_individual <- survfit(cox_model, newdata = asegurados)
+
+# Etiquetas para el gráfico
+etiquetas <- c("Asegurado 1: x1=0, x2=0, x3=1", 
+               "Asegurado 2: x1=0, x2=1, x3=1")
+
+# Representación gráfica
+plot_curvas_supervivencia <- ggsurvplot(
+  supervivencia_individual,
+  data = asegurados,
+  legend.title = "Perfil del asegurado",
+  legend.labs = etiquetas,
+  conf.int = TRUE,
+  xlab = "Tiempo (meses)",
+  ylab = "Probabilidad de seguir de baja",
+  palette = c("#E69F00", "#56B4E9")
+)
+
+print(plot_curvas_supervivencia$plot)
+```
+
+Observamos que la curva de supervivencia del segundo asegurado (la curva marcada en azul), desciende más rápidamente que la del asegurado 1. Esto indica que tendrá una reincorporación más temprana al trabajo, debido a que ha tenido una operación menor.
+
+Sin embargo, observamos que la curva del asegurado 1 decrece muy lentamente, lo que indica que el hecho de haberse sometido a una operación grave alarga notoriamente el tiempo de baja.
+
+Por último, calculamos la probabilidad de que la baja laboral dure más de dos semanas (medio mes) para cada uno de los asegurados.
+
+```{r}
+# Supervivencia en el tiempo 0.5 meses
+probabilidades_05 <- summary(supervivencia_individual, times = 0.5)
+
+# Probabilidad de supervivencia
+probabilidades_05$surv
+```
+
+Como ya sugería el gráfico, la probabilidad de seguir de baja después de dos semanas es mucho mayor para el asegurado 1, quien ha sido sometido a una operación mayor y además presenta patologías.
+
+g)  ¿Se cumple la hipótesis de proporcionalidad en el modelo de Cox estimado en f)? En caso de que no se cumpla, busca alguna forma de solucionar el problema.
+
+    Comprobamos la condición de proporcionalidad.
+
+    ```{r}
+    # Test de proporcionalidad
+    cox_zph <- cox.zph(cox_model)
+    cox_zph
+    ```
+
+    ```{r}
+    # Observamos los residuos para cada variable
+    plot(cox_zph)
+    ```
+
+Los p-valores del test de Schoenfeld son: `x1` `r fmt_p(cox_zph$table["x1", "p"])`, `x2` `r fmt_p(cox_zph$table["x2", "p"])`, `x3` `r fmt_p(cox_zph$table["x3", "p"])` y global `r fmt_p(cox_zph$table["GLOBAL", "p"])`. Un p-valor menor que 0.05 es evidencia contra la proporcionalidad de esa variable. Para no forzar a `x2` (tipo de operación) a tener un efecto proporcional en el tiempo, estratificamos por `x2`: el modelo permite un riesgo de base distinto para cada tipo de operación, a costa de no estimar un coeficiente para `x2`.
+
+```{r}
+# Modelo Cox estratificado en x2
+cox_model_estrat <- coxph(Surv(time, status) ~ x1 + x3 + strata(x2), data = datos)
+
+# Resumen
+summary(cox_model_estrat)
+
+# Test de proporcionalidad
+cox_zph_estrat <- cox.zph(cox_model_estrat)
+cox_zph_estrat
+```
+
+```{r}
+plot(cox_zph_estrat)
+```
+
+Tras estratificar, los p-valores del test de proporcionalidad son `x1` `r fmt_p(cox_zph_estrat$table["x1", "p"])`, `x3` `r fmt_p(cox_zph_estrat$table["x3", "p"])` y global `r fmt_p(cox_zph_estrat$table["GLOBAL", "p"])`. En el modelo estratificado, el HR de `x1` es `r hr_cox(cox_model_estrat, "x1")` y el de `x3` es `r hr_cox(cox_model_estrat, "x3")`, con la misma interpretación que en el modelo anterior.
+
+# Conclusiones
+
+```{r, include=FALSE}
+p_lr <- sapply(list(x1 = logrank_test_x1, x2 = logrank_test_x2, x3 = logrank_test_x3),
+               function(t) pchisq(t$chisq, df = length(t$n) - 1, lower.tail = FALSE))
+```
+
+- **Kaplan-Meier y log-rank:** los p-valores de la comparación de curvas son `r fmt_p(p_lr["x1"])` para la edad (`x1`), `r fmt_p(p_lr["x2"])` para el tipo de operación (`x2`) y `r fmt_p(p_lr["x3"])` para las patologías persistentes (`x3`).
+- **Modelos AFT:** el modelo con menor AIC es el `r c("Weibull", "exponencial")[which.min(c(AIC(aft_weibull), AIC(aft_exp)))]`.
+- **Modelo de Cox:** HR de `r hr_cox(cox_model, "x1")` para `x1`, `r hr_cox(cox_model, "x2")` para `x2` y `r hr_cox(cox_model, "x3")` para `x3`; concordancia de `r round(100 * summary(cox_model)$concordance[1], 1)`%.
+- **Proporcionalidad de riesgos:** el test de Schoenfeld global del modelo inicial tiene p `r fmt_p(cox_zph$table["GLOBAL", "p"])`; para `x2` el p-valor es `r fmt_p(cox_zph$table["x2", "p"])`, por lo que se ajustó un modelo estratificado por esa variable.
+- **Limitaciones:** muestra de un único colectivo, sin interacciones entre variables ni validación externa, y el modelo estratificado no estima el efecto de `x2`.
+
+# Información de la sesión
+
+```{r, comment=""}
+sessionInfo()
+```
